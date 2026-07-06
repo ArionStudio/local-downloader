@@ -19,6 +19,7 @@ use std::{
     },
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
 type CommandResult<T> = Result<T, String>;
@@ -427,12 +428,36 @@ pub async fn select_download_dir() -> CommandResult<Option<String>> {
 }
 
 #[tauri::command]
-pub async fn check_app_update() -> CommandResult<Option<AppUpdate>> {
-    Ok(None)
+pub async fn check_app_update(app: AppHandle) -> CommandResult<Option<AppUpdate>> {
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    Ok(update.map(|update| AppUpdate {
+        version: update.version,
+        notes: update.body.unwrap_or_default(),
+    }))
 }
 
 #[tauri::command]
-pub async fn install_app_update() -> CommandResult<()> {
+pub async fn install_app_update(app: AppHandle) -> CommandResult<()> {
+    if let Some(update) = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|error| error.to_string())?;
+        app.restart();
+    }
+
     Ok(())
 }
 

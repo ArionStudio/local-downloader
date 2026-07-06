@@ -33,6 +33,7 @@ import {
   createVideoThumbnail,
   getJob,
   getSettings,
+  installAppUpdate,
   localFilePreviewUrl,
   listJobs,
   onDownloadJobEvent,
@@ -119,7 +120,9 @@ function App() {
   const [formatsByPreset, setFormatsByPreset] = useState<
     Record<string, FormatAnalysis>
   >({})
-  const [loadingFormatsKey, setLoadingFormatsKey] = useState<string | null>(null)
+  const [loadingFormatsKey, setLoadingFormatsKey] = useState<string | null>(
+    null
+  )
   const [showSettings, setShowSettings] = useState(false)
   const [jobs, setJobs] = useState<Job[]>([])
   const [jobLogs, setJobLogs] = useState<Record<string, JobLog[]>>({})
@@ -160,7 +163,7 @@ function App() {
           [job.id]: [...(current[job.id] ?? []), log],
         }))
         pushSessionLog(
-          `${log.createdAt} ${log.level.toUpperCase()} ${job.presetId}: ${log.message}`,
+          `${log.createdAt} ${log.level.toUpperCase()} ${job.presetId}: ${log.message}`
         )
       }
     })
@@ -175,7 +178,7 @@ function App() {
     () =>
       analysis?.presets.find((preset) => preset.id === selectedPresetId) ??
       null,
-    [analysis, selectedPresetId],
+    [analysis, selectedPresetId]
   )
 
   const activeJob = useMemo(
@@ -184,9 +187,9 @@ function App() {
         (job) =>
           job.sourceUrl === analysis?.normalizedUrl &&
           job.presetId === selectedPresetId &&
-          !["completed", "failed", "canceled"].includes(job.status),
+          !["completed", "failed", "canceled"].includes(job.status)
       ) ?? null,
-    [analysis?.normalizedUrl, jobs, selectedPresetId],
+    [analysis?.normalizedUrl, jobs, selectedPresetId]
   )
 
   const recentJobs = jobs.slice(0, 8)
@@ -213,7 +216,7 @@ function App() {
         setSelectedPresetId(null)
         if (normalizeInput) setUrl(result.normalizedUrl)
         pushSessionLog(
-          `${new Date().toISOString()} INFO analyze: ${siteLabels[result.siteKind]} ${result.presets.length} presets`,
+          `${new Date().toISOString()} INFO analyze: ${siteLabels[result.siteKind]} ${result.presets.length} presets`
         )
       } catch (reason) {
         setAnalysis(null)
@@ -222,7 +225,7 @@ function App() {
         setIsAnalyzing(false)
       }
     },
-    [pushSessionLog],
+    [pushSessionLog]
   )
 
   useEffect(() => {
@@ -253,7 +256,9 @@ function App() {
       }
       handleUrlChange(cleanText)
     } catch {
-      setError("Paste was blocked. Use Ctrl+V or check app clipboard permissions.")
+      setError(
+        "Paste was blocked. Use Ctrl+V or check app clipboard permissions."
+      )
     }
   }
 
@@ -277,7 +282,7 @@ function App() {
       advanced: advancedByPreset[key] ?? defaultAdvancedOptions,
     }
     pushSessionLog(
-      `${new Date().toISOString()} INFO start: ${preset.id} ${analysis.normalizedUrl}`,
+      `${new Date().toISOString()} INFO start: ${preset.id} ${analysis.normalizedUrl}`
     )
     const job = await startDownload(request)
     setJobs((current) => upsertJob(current, job))
@@ -292,14 +297,14 @@ function App() {
     try {
       const result = await analyzeFormats(
         analysis.normalizedUrl,
-        authForPreset(preset, settings.auth),
+        authForPreset(preset, settings.auth)
       )
       setFormatsByPreset((current) => ({ ...current, [key]: result }))
       setAdvancedByPreset((current) => ({
         ...current,
         [key]: normalizeAdvancedForDuration(
           current[key] ?? defaultAdvancedOptions,
-          result.duration ?? null,
+          result.duration ?? null
         ),
       }))
     } catch (reason) {
@@ -311,7 +316,7 @@ function App() {
 
   function handleAdvancedChange(
     preset: Preset,
-    nextOptions: AdvancedDownloadOptions,
+    nextOptions: AdvancedDownloadOptions
   ) {
     if (!analysis) return
     const key = advancedKey(analysis.normalizedUrl, preset.id)
@@ -338,8 +343,20 @@ function App() {
 
   async function handleCheckAppUpdate() {
     setAppUpdateLabel("Checking")
-    const update = await checkAppUpdate()
-    setAppUpdateLabel(update ? `v${update.version}` : "Up to date")
+    try {
+      const update = await checkAppUpdate()
+      if (!update) {
+        setAppUpdateLabel("Up to date")
+        return
+      }
+
+      setAppUpdateLabel(`Installing v${update.version}`)
+      await installAppUpdate()
+      setAppUpdateLabel("Restarting")
+    } catch (reason) {
+      setAppUpdateLabel("Update failed")
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
   }
 
   async function handleCheckTools() {
@@ -379,7 +396,7 @@ function App() {
       `phase=${job.phase}`,
       job.errorMessage ? `error=${job.errorMessage}` : "",
       ...logs.map(
-        (log) => `${log.createdAt} ${log.level.toUpperCase()} ${log.message}`,
+        (log) => `${log.createdAt} ${log.level.toUpperCase()} ${log.message}`
       ),
     ].filter(Boolean)
 
@@ -453,7 +470,7 @@ function App() {
             "flex flex-1 flex-col transition-[padding] duration-300",
             screenState === "idle" && !showSettings
               ? "justify-center pb-24"
-              : "justify-start pt-12",
+              : "justify-start pt-12"
           )}
         >
           <motion.form
@@ -537,7 +554,7 @@ function App() {
                           jobs.find(
                             (job) =>
                               job.sourceUrl === analysis.normalizedUrl &&
-                              job.presetId === preset.id,
+                              job.presetId === preset.id
                           ) ?? null
                         }
                         outputDir={settings.defaultOutputDir}
@@ -684,8 +701,7 @@ function SettingsPanel({
                       ? selectedBrowsers
                       : [{ browser: "firefox" }],
                 })
-              }
-              else if (next === "cookie_file") {
+              } else if (next === "cookie_file") {
                 setAuth({ kind: "cookie_file", path: cookieFile })
               } else setAuth({ kind: "none" })
             }}
@@ -702,14 +718,14 @@ function SettingsPanel({
           <div className="grid grid-cols-2 gap-2 rounded-md border bg-background p-2 sm:grid-cols-4">
             {browsers.map((browserName) => {
               const checked = selectedBrowsers.some(
-                (source) => source.browser === browserName,
+                (source) => source.browser === browserName
               )
               return (
                 <label
                   key={browserName}
                   className={cn(
-                    "flex h-8 items-center gap-2 rounded border px-2 text-xs capitalize text-foreground",
-                    authMode !== "browser" && "opacity-50",
+                    "flex h-8 items-center gap-2 rounded border px-2 text-xs text-foreground capitalize",
+                    authMode !== "browser" && "opacity-50"
                   )}
                 >
                   <input
@@ -784,7 +800,8 @@ function PresetRow({
   onAdvancedChange,
   onLoadFormats,
 }: PresetRowProps) {
-  const running = job && !["completed", "failed", "canceled"].includes(job.status)
+  const running =
+    job && !["completed", "failed", "canceled"].includes(job.status)
   const canUseAuth = isAuthConfigured(auth)
 
   return (
@@ -792,7 +809,7 @@ function PresetRow({
       layout
       className={cn(
         "overflow-hidden rounded-lg border bg-card transition-colors",
-        selected && "border-foreground/25",
+        selected && "border-foreground/25"
       )}
     >
       <button
@@ -803,7 +820,7 @@ function PresetRow({
         <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium">{preset.label}</span>
-            <span className="rounded border bg-muted px-1.5 py-0.5 text-[11px] uppercase tracking-normal text-muted-foreground">
+            <span className="rounded border bg-muted px-1.5 py-0.5 text-[11px] tracking-normal text-muted-foreground uppercase">
               video
             </span>
             <span className="rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
@@ -817,7 +834,7 @@ function PresetRow({
         <ChevronRight
           className={cn(
             "size-4 text-muted-foreground transition-transform",
-            selected && "rotate-90",
+            selected && "rotate-90"
           )}
         />
       </button>
@@ -840,7 +857,9 @@ function PresetRow({
                 <>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-                      <div className="text-xs text-muted-foreground">Output</div>
+                      <div className="text-xs text-muted-foreground">
+                        Output
+                      </div>
                       <div className="mt-0.5 truncate">
                         {outputDir ?? "Downloads"}
                       </div>
@@ -907,7 +926,9 @@ function AdvancedDownloadPanel({
 }) {
   const segment = options.segment ?? defaultAdvancedOptions.segment
   const duration = formatInfo?.duration ?? null
-  const videoFormats = (formatInfo?.formats ?? []).filter((format) => format.hasVideo)
+  const videoFormats = (formatInfo?.formats ?? []).filter(
+    (format) => format.hasVideo
+  )
   const selectedFormatId =
     options.format.kind === "format"
       ? options.format.formatId
@@ -919,7 +940,9 @@ function AdvancedDownloadPanel({
     onChange({ ...options, format })
   }
 
-  function setSegment(nextSegment: NonNullable<AdvancedDownloadOptions["segment"]>) {
+  function setSegment(
+    nextSegment: NonNullable<AdvancedDownloadOptions["segment"]>
+  ) {
     onChange({ ...options, segment: nextSegment })
   }
 
@@ -993,7 +1016,8 @@ function AdvancedDownloadPanel({
         />
       </div>
 
-      {options.format.kind === "format" || options.format.kind === "video_only" ? (
+      {options.format.kind === "format" ||
+      options.format.kind === "video_only" ? (
         <label className="mt-3 block space-y-1 text-xs text-muted-foreground">
           Quality
           <select
@@ -1058,7 +1082,7 @@ function AdvancedDownloadPanel({
                     startSeconds,
                     endSeconds: Math.max(
                       startSeconds,
-                      segment.endSeconds ?? duration ?? startSeconds,
+                      segment.endSeconds ?? duration ?? startSeconds
                     ),
                   })
                 }
@@ -1099,7 +1123,7 @@ function ModeButton({
       onClick={onClick}
       className={cn(
         "flex h-8 items-center justify-center gap-1.5 rounded px-2 text-xs",
-        active ? "bg-background shadow-sm" : "text-muted-foreground",
+        active ? "bg-background shadow-sm" : "text-muted-foreground"
       )}
     >
       {icon}
@@ -1127,7 +1151,7 @@ function SegmentRange({
 
   return (
     <div className="relative h-8">
-      <div className="absolute left-0 right-0 top-3 h-2 rounded-full bg-muted" />
+      <div className="absolute top-3 right-0 left-0 h-2 rounded-full bg-muted" />
       <div
         className="absolute top-3 h-2 rounded-full bg-foreground"
         style={{
@@ -1235,7 +1259,7 @@ function JobProgress({
         <div
           className={cn(
             "h-full rounded-full transition-all",
-            failed || canceled ? "bg-destructive" : "bg-foreground",
+            failed || canceled ? "bg-destructive" : "bg-foreground"
           )}
           style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}
         />
@@ -1243,7 +1267,9 @@ function JobProgress({
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
         {job.speed ? <span>{job.speed}</span> : null}
         {job.eta ? <span>ETA {job.eta}</span> : null}
-        {job.outputPath ? <span className="truncate">{job.outputPath}</span> : null}
+        {job.outputPath ? (
+          <span className="truncate">{job.outputPath}</span>
+        ) : null}
         {job.errorMessage ? (
           <span className="text-destructive">{job.errorMessage}</span>
         ) : null}
@@ -1252,13 +1278,7 @@ function JobProgress({
   )
 }
 
-function JobLine({
-  job,
-  onCopyLogs,
-}: {
-  job: Job
-  onCopyLogs: () => void
-}) {
+function JobLine({ job, onCopyLogs }: { job: Job; onCopyLogs: () => void }) {
   return (
     <div className="grid grid-cols-[1fr_auto_auto] items-center gap-3 rounded-lg border bg-card px-4 py-3">
       <div className="min-w-0">
@@ -1269,7 +1289,7 @@ function JobLine({
           {job.phase}
         </div>
       </div>
-      <span className="rounded border bg-muted px-2 py-1 text-xs capitalize text-muted-foreground">
+      <span className="rounded border bg-muted px-2 py-1 text-xs text-muted-foreground capitalize">
         {job.status}
       </span>
       <Button
@@ -1335,11 +1355,15 @@ function DownloadedItem({
             draggable={false}
           />
         ) : previewUrl ? (
-          <video src={previewUrl} className="h-full w-full object-cover" muted />
+          <video
+            src={previewUrl}
+            className="h-full w-full object-cover"
+            muted
+          />
         ) : (
           <Download className="size-5 text-muted-foreground" />
         )}
-        <span className="absolute bottom-2 right-2 flex size-6 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm">
+        <span className="absolute right-2 bottom-2 flex size-6 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm">
           <FolderOpen className="size-3.5" />
         </span>
       </button>
@@ -1444,11 +1468,15 @@ function advancedKey(url: string, presetId: string): string {
 
 function normalizeAdvancedForDuration(
   options: AdvancedDownloadOptions,
-  duration: number | null,
+  duration: number | null
 ): AdvancedDownloadOptions {
   if (!options.segment?.enabled || !duration) return options
   const startSeconds = clamp(options.segment.startSeconds, 0, duration)
-  const endSeconds = clamp(options.segment.endSeconds ?? duration, startSeconds, duration)
+  const endSeconds = clamp(
+    options.segment.endSeconds ?? duration,
+    startSeconds,
+    duration
+  )
   return {
     ...options,
     segment: {
@@ -1513,7 +1541,7 @@ function isLikelyVideoPath(path: string): boolean {
 function upsertJob(jobs: Job[], next: Job): Job[] {
   const without = jobs.filter((job) => job.id !== next.id)
   return [next, ...without].sort((left, right) =>
-    right.updatedAt.localeCompare(left.updatedAt),
+    right.updatedAt.localeCompare(left.updatedAt)
   )
 }
 
