@@ -2,6 +2,7 @@ export type SiteKind =
   | "generic"
   | "reddit"
   | "linkedin"
+  | "crunchyroll"
   | "youtube"
   | "x"
   | "vimeo"
@@ -11,10 +12,7 @@ export type SiteKind =
 
 export type OutputKind = "video"
 
-export type Pipeline =
-  | "yt_dlp"
-  | "ffmpeg_hls"
-  | "http_resolve_then_download"
+export type Pipeline = "yt_dlp" | "ffmpeg_hls" | "http_resolve_then_download"
 
 export type AuthRequirement = "none" | "optional" | "recommended" | "required"
 

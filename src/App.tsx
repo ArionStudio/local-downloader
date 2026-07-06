@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { FormEvent, ReactNode } from "react"
+import type { FormEvent } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertCircle,
   Check,
+  ChevronLeft,
   ChevronRight,
   Clipboard,
   ClipboardPaste,
@@ -12,6 +13,7 @@ import {
   FolderOpen,
   Film,
   Loader2,
+  List,
   Music,
   Play,
   RefreshCw,
@@ -24,13 +26,24 @@ import {
   Wrench,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Slider } from "@/components/ui/slider"
+import { Switch } from "@/components/ui/switch"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   analyzeFormats,
   analyzeUrl,
   cancelJob,
   checkAppUpdate,
   checkToolUpdates,
-  createVideoThumbnail,
   getJob,
   getSettings,
   installAppUpdate,
@@ -54,6 +67,8 @@ import type {
   BrowserAuthSource,
   BrowserKind,
   FormatAnalysis,
+  FormatOption,
+  FormatSelection,
   Job,
   JobLog,
   Preset,
@@ -63,12 +78,27 @@ import type {
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type ScreenState = "idle" | "analyzed" | "configuring" | "running"
+type AppTab = "download" | "runs" | "downloaded"
+
+type DownloadAsset = {
+  path: string
+  job: Job
+}
+
+type DownloadNavigatorItem = {
+  id: string
+  index: number
+  sourceUrl: string
+  siteLabel: string
+  title: string
+  status: string
+}
 
 const siteLabels: Record<SiteKind, string> = {
   generic: "Generic",
   reddit: "Reddit",
   linkedin: "LinkedIn",
+  crunchyroll: "Crunchyroll",
   youtube: "YouTube",
   x: "X",
   vimeo: "Vimeo",
@@ -107,10 +137,20 @@ const defaultAdvancedOptions: AdvancedDownloadOptions = {
   },
 }
 
+const autoQualityValue = "__auto__"
+const allRunPresetsValue = "__all_presets__"
+const runsPanelDomId = "runs-panel"
+
 function App() {
   const [url, setUrl] = useState("")
-  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<AppTab>("download")
+  const [runPresetFilter, setRunPresetFilter] = useState(allRunPresetsValue)
+  const [analysesByUrl, setAnalysesByUrl] = useState<
+    Record<string, AnalyzeResult>
+  >({})
+  const [selectedPresetByUrl, setSelectedPresetByUrl] = useState<
+    Record<string, string>
+  >({})
   const [settings, setSettings] = useState<DownloaderSettings>(defaultSettings)
   const [draftSettings, setDraftSettings] =
     useState<DownloaderSettings>(defaultSettings)
@@ -123,19 +163,29 @@ function App() {
   const [loadingFormatsKey, setLoadingFormatsKey] = useState<string | null>(
     null
   )
+  const [analyzingUrls, setAnalyzingUrls] = useState<Record<string, boolean>>(
+    {}
+  )
+  const [assetPathsByJob, setAssetPathsByJob] = useState<
+    Record<string, string[]>
+  >({})
   const [showSettings, setShowSettings] = useState(false)
   const [jobs, setJobs] = useState<Job[]>([])
   const [jobLogs, setJobLogs] = useState<Record<string, JobLog[]>>({})
   const [sessionLogs, setSessionLogs] = useState<string[]>([])
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [appUpdateLabel, setAppUpdateLabel] = useState("Up to date")
   const [toolLabel, setToolLabel] = useState("Tools")
-  const lastAnalyzedUrl = useRef("")
+  const analysesByUrlRef = useRef<Record<string, AnalyzeResult>>({})
+  const analyzingUrlSet = useRef(new Set<string>())
 
   const pushSessionLog = useCallback((line: string) => {
     setSessionLogs((current) => [...current.slice(-199), line])
   }, [])
+
+  const inputUrls = useMemo(() => extractUrls(url), [url])
+  const inputUrlsKey = inputUrls.join("\n")
+  const isAnalyzing = Object.values(analyzingUrls).some(Boolean)
 
   useEffect(() => {
     getSettings()
@@ -174,76 +224,175 @@ function App() {
     }
   }, [pushSessionLog])
 
-  const selectedPreset = useMemo(
-    () =>
-      analysis?.presets.find((preset) => preset.id === selectedPresetId) ??
-      null,
-    [analysis, selectedPresetId]
-  )
+  useEffect(() => {
+    analysesByUrlRef.current = analysesByUrl
+  }, [analysesByUrl])
 
-  const activeJob = useMemo(
-    () =>
-      jobs.find(
-        (job) =>
-          job.sourceUrl === analysis?.normalizedUrl &&
-          job.presetId === selectedPresetId &&
-          !["completed", "failed", "canceled"].includes(job.status)
-      ) ?? null,
-    [analysis?.normalizedUrl, jobs, selectedPresetId]
-  )
+  useEffect(() => {
+    let canceled = false
+    const jobsToLoad = jobs.filter(
+      (job) => assetPathsByJob[job.id] === undefined
+    )
 
-  const recentJobs = jobs.slice(0, 8)
+    jobsToLoad.forEach((job) => {
+      getJob(job.id)
+        .then((detail) => {
+          if (canceled) return
+          setAssetPathsByJob((current) => ({
+            ...current,
+            [job.id]: assetPathsFromJob(detail, detail.logs),
+          }))
+        })
+        .catch(() => {
+          if (canceled) return
+          setAssetPathsByJob((current) => ({
+            ...current,
+            [job.id]: assetPathsFromJob(job, jobLogs[job.id] ?? []),
+          }))
+        })
+    })
+
+    return () => {
+      canceled = true
+    }
+  }, [assetPathsByJob, jobLogs, jobs])
+
+  const runJobs = jobs
+  const knownPresetLabels = useMemo(() => {
+    const labels: Record<string, string> = {}
+    Object.values(analysesByUrl).forEach((analysis) => {
+      analysis.presets.forEach((preset) => {
+        labels[preset.id] = preset.label
+      })
+    })
+    return labels
+  }, [analysesByUrl])
+  const runPresetOptions = useMemo(
+    () => runPresetOptionsFromJobs(runJobs, knownPresetLabels),
+    [knownPresetLabels, runJobs]
+  )
+  const visibleRunJobs = useMemo(
+    () =>
+      runPresetFilter === allRunPresetsValue
+        ? runJobs
+        : runJobs.filter((job) => job.presetId === runPresetFilter),
+    [runJobs, runPresetFilter]
+  )
   const completedJobs = jobs.filter((job) => job.status === "completed")
-  const screenState: ScreenState = activeJob
-    ? "running"
-    : selectedPreset
-      ? "configuring"
-      : analysis
-        ? "analyzed"
-        : "idle"
+  const assetsByJob = useMemo(
+    () =>
+      Object.fromEntries(
+        jobs.map((job) => [
+          job.id,
+          uniqueStrings([
+            ...(assetPathsByJob[job.id] ?? []),
+            ...assetPathsFromJob(job, jobLogs[job.id] ?? []),
+          ]),
+        ])
+      ),
+    [assetPathsByJob, jobLogs, jobs]
+  )
+  const downloadedAssets = useMemo(
+    () =>
+      completedJobs.flatMap((job) =>
+        (assetsByJob[job.id] ?? []).map((path) => ({ path, job }))
+      ),
+    [assetsByJob, completedJobs]
+  )
+  const downloadNavItems = useMemo(
+    () =>
+      inputUrls.map((inputUrl, index) => {
+        const analysis = analysesByUrl[inputUrl]
+        return {
+          id: downloadItemDomId(inputUrl),
+          index: index + 1,
+          sourceUrl: inputUrl,
+          siteLabel: analysis ? siteLabels[analysis.siteKind] : "Link",
+          title: compactUrlLabel(inputUrl),
+          status: analyzingUrls[inputUrl]
+            ? "Inspecting"
+            : analysis
+              ? "Ready"
+              : "Queued",
+        }
+      }),
+    [analysesByUrl, analyzingUrls, inputUrls]
+  )
 
   const runAnalysis = useCallback(
     async (inputUrl: string, normalizeInput: boolean) => {
-      if (lastAnalyzedUrl.current === inputUrl) return
+      const cleanUrl = inputUrl.trim()
+      if (!looksLikeUrl(cleanUrl)) return
+      if (
+        analysesByUrlRef.current[cleanUrl] ||
+        analyzingUrlSet.current.has(cleanUrl)
+      ) {
+        return
+      }
 
-      setIsAnalyzing(true)
+      analyzingUrlSet.current.add(cleanUrl)
+      setAnalyzingUrls((current) => ({ ...current, [cleanUrl]: true }))
       setError(null)
       try {
-        pushSessionLog(`${new Date().toISOString()} INFO analyze: ${inputUrl}`)
-        const result = await analyzeUrl(inputUrl)
-        lastAnalyzedUrl.current = inputUrl
-        setAnalysis(result)
-        setSelectedPresetId(null)
+        pushSessionLog(`${new Date().toISOString()} INFO analyze: ${cleanUrl}`)
+        const result = await analyzeUrl(cleanUrl)
+        setAnalysesByUrl((current) => ({
+          ...current,
+          [cleanUrl]: result,
+          [result.normalizedUrl]: result,
+        }))
+        setSelectedPresetByUrl((current) => {
+          const firstPresetId = result.presets[0]?.id
+          if (!firstPresetId) return current
+          return {
+            ...current,
+            [cleanUrl]: current[cleanUrl] ?? firstPresetId,
+            [result.normalizedUrl]:
+              current[result.normalizedUrl] ??
+              current[cleanUrl] ??
+              firstPresetId,
+          }
+        })
         if (normalizeInput) setUrl(result.normalizedUrl)
         pushSessionLog(
           `${new Date().toISOString()} INFO analyze: ${siteLabels[result.siteKind]} ${result.presets.length} presets`
         )
       } catch (reason) {
-        setAnalysis(null)
         setError(reason instanceof Error ? reason.message : String(reason))
       } finally {
-        setIsAnalyzing(false)
+        analyzingUrlSet.current.delete(cleanUrl)
+        setAnalyzingUrls((current) => {
+          const next = { ...current }
+          delete next[cleanUrl]
+          return next
+        })
       }
     },
     [pushSessionLog]
   )
 
   useEffect(() => {
-    const cleanUrl = url.trim()
-    if (!looksLikeUrl(cleanUrl)) return
+    if (inputUrls.length === 0) return
 
     const timeout = window.setTimeout(() => {
-      void runAnalysis(cleanUrl, false)
+      inputUrls.forEach((inputUrl) => {
+        void runAnalysis(inputUrl, false)
+      })
     }, 300)
 
     return () => window.clearTimeout(timeout)
-  }, [runAnalysis, url])
+  }, [inputUrls, inputUrlsKey, runAnalysis])
 
   async function handleAnalyze(event?: FormEvent) {
     event?.preventDefault()
-    const cleanUrl = url.trim()
-    if (!cleanUrl) return
-    await runAnalysis(cleanUrl, true)
+    if (inputUrls.length === 0) {
+      setError("Paste one or more http(s) links.")
+      return
+    }
+    setActiveTab("download")
+    await Promise.all(
+      inputUrls.map((inputUrl) => runAnalysis(inputUrl, inputUrls.length === 1))
+    )
   }
 
   async function handlePaste() {
@@ -254,7 +403,9 @@ function App() {
         setError("Clipboard is empty.")
         return
       }
-      handleUrlChange(cleanText)
+      const pastedUrls = extractUrls(cleanText)
+      handleUrlChange(pastedUrls.length > 1 ? pastedUrls.join("\n") : cleanText)
+      if (pastedUrls.length > 0) setActiveTab("download")
     } catch {
       setError(
         "Paste was blocked. Use Ctrl+V or check app clipboard permissions."
@@ -262,15 +413,16 @@ function App() {
     }
   }
 
-  async function handleStart(preset: Preset) {
-    if (!analysis) return
+  async function handleStart(sourceUrl: string, preset: Preset) {
+    const analysis = analysesByUrl[sourceUrl]
+    if (!analysis) return false
 
     const key = advancedKey(analysis.normalizedUrl, preset.id)
     const auth = authForPreset(preset, settings.auth)
     if (preset.auth === "required" && !isAuthConfigured(auth)) {
       setError("Configure browser cookies or cookies.txt in Settings first.")
       setShowSettings(true)
-      return
+      return false
     }
 
     const request: StartDownloadRequest = {
@@ -284,11 +436,54 @@ function App() {
     pushSessionLog(
       `${new Date().toISOString()} INFO start: ${preset.id} ${analysis.normalizedUrl}`
     )
-    const job = await startDownload(request)
-    setJobs((current) => upsertJob(current, job))
+    try {
+      const job = await startDownload(request)
+      setJobs((current) => upsertJob(current, job))
+      return true
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+      return false
+    }
   }
 
-  async function handleLoadFormats(preset: Preset) {
+  function scrollToDownloadItem(sourceUrl: string) {
+    document.getElementById(downloadItemDomId(sourceUrl))?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    })
+  }
+
+  function openRunsForPreset(presetId: string) {
+    setRunPresetFilter(presetId)
+    setActiveTab("runs")
+    window.setTimeout(() => {
+      document.getElementById(runsPanelDomId)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      })
+    }, 0)
+  }
+
+  async function handleStartAll() {
+    const startable = inputUrls
+      .map((sourceUrl) => {
+        const analysis = analysesByUrl[sourceUrl]
+        const presetId = selectedPresetByUrl[sourceUrl]
+        const preset = analysis?.presets.find((item) => item.id === presetId)
+        return analysis && preset ? { sourceUrl, preset } : null
+      })
+      .filter((item): item is { sourceUrl: string; preset: Preset } =>
+        Boolean(item)
+      )
+
+    for (const item of startable) {
+      const started = await handleStart(item.sourceUrl, item.preset)
+      if (!started) break
+    }
+  }
+
+  async function handleLoadFormats(sourceUrl: string, preset: Preset) {
+    const analysis = analysesByUrl[sourceUrl]
     if (!analysis) return
 
     const key = advancedKey(analysis.normalizedUrl, preset.id)
@@ -315,9 +510,11 @@ function App() {
   }
 
   function handleAdvancedChange(
+    sourceUrl: string,
     preset: Preset,
     nextOptions: AdvancedDownloadOptions
   ) {
+    const analysis = analysesByUrl[sourceUrl]
     if (!analysis) return
     const key = advancedKey(analysis.normalizedUrl, preset.id)
     setAdvancedByPreset((current) => ({ ...current, [key]: nextOptions }))
@@ -367,11 +564,15 @@ function App() {
 
   function handleUrlChange(nextUrl: string) {
     setUrl(nextUrl)
-    if (!looksLikeUrl(nextUrl.trim())) {
-      lastAnalyzedUrl.current = ""
-      setAnalysis(null)
-      setSelectedPresetId(null)
-    }
+    if (extractUrls(nextUrl).length === 0) setError(null)
+  }
+
+  function handlePresetChange(sourceUrl: string, presetId: string | null) {
+    if (!presetId) return
+    setSelectedPresetByUrl((current) => ({
+      ...current,
+      [sourceUrl]: presetId,
+    }))
   }
 
   async function copyAllLogs() {
@@ -442,13 +643,14 @@ function App() {
               {appUpdateLabel}
             </Button>
             <Button
-              size="icon"
+              size="sm"
               variant="outline"
-              className="size-8"
+              className="h-8 gap-1.5 px-2.5 text-xs"
               aria-label="Settings"
               onClick={() => setShowSettings((current) => !current)}
             >
               <SettingsIcon className="size-4" />
+              Settings
             </Button>
           </div>
         </header>
@@ -464,44 +666,32 @@ function App() {
           ) : null}
         </AnimatePresence>
 
-        <motion.section
-          layout
-          className={cn(
-            "flex flex-1 flex-col transition-[padding] duration-300",
-            screenState === "idle" && !showSettings
-              ? "justify-center pb-24"
-              : "justify-start pt-12"
-          )}
-        >
-          <motion.form
-            layout
-            onSubmit={handleAnalyze}
-            className="mx-auto w-full max-w-3xl"
-          >
-            <div className="group flex h-14 items-center gap-3 rounded-lg border bg-card px-4 shadow-sm transition-shadow focus-within:shadow-md">
+        <section className="flex flex-1 flex-col justify-start pt-8">
+          <form onSubmit={handleAnalyze} className="mx-auto w-full max-w-5xl">
+            <div className="group grid min-h-24 grid-cols-[auto_1fr_auto] items-start gap-3 rounded-lg border bg-card px-4 py-3 shadow-sm transition-shadow focus-within:shadow-md">
               {isAnalyzing ? (
-                <Loader2 className="size-5 shrink-0 animate-spin text-muted-foreground" />
+                <Loader2 className="mt-1 size-5 shrink-0 animate-spin text-muted-foreground" />
               ) : (
-                <Search className="size-5 shrink-0 text-muted-foreground" />
+                <Search className="mt-1 size-5 shrink-0 text-muted-foreground" />
               )}
-              <input
+              <textarea
                 value={url}
                 onChange={(event) => handleUrlChange(event.target.value)}
-                placeholder="Paste URL"
-                className="h-full min-w-0 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground"
+                placeholder="Paste one or more URLs"
+                className="min-h-16 resize-none bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
               />
               <Button
                 type="button"
                 size="sm"
                 disabled={isAnalyzing}
-                className="gap-1.5"
+                className="gap-1.5 self-start"
                 onClick={handlePaste}
               >
                 <ClipboardPaste className="size-3.5" />
                 Paste
               </Button>
             </div>
-          </motion.form>
+          </form>
 
           <AnimatePresence mode="popLayout">
             {error ? (
@@ -516,109 +706,236 @@ function App() {
                 {error}
               </motion.div>
             ) : null}
+          </AnimatePresence>
 
-            {analysis ? (
-              <motion.div
-                layout
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 12 }}
-                className="mx-auto mt-5 w-full max-w-3xl"
-              >
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="rounded-md border bg-muted px-2 py-1 font-medium">
-                      {siteLabels[analysis.siteKind]}
-                    </span>
-                    <span className="text-muted-foreground">
-                      {analysis.presets.length} presets
-                    </span>
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => setActiveTab(value as AppTab)}
+            className="mx-auto mt-5 w-full max-w-5xl"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <TabsList>
+                <TabsTrigger value="download">Download</TabsTrigger>
+                <TabsTrigger value="runs">
+                  Runs
+                  {runJobs.length > 0 ? ` ${runJobs.length}` : ""}
+                </TabsTrigger>
+                <TabsTrigger value="downloaded">
+                  Downloaded
+                  {downloadedAssets.length > 0
+                    ? ` ${downloadedAssets.length}`
+                    : ""}
+                </TabsTrigger>
+              </TabsList>
+
+              {inputUrls.length > 1 ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={
+                    inputUrls.some((inputUrl) => !analysesByUrl[inputUrl]) ||
+                    isAnalyzing
+                  }
+                  onClick={handleStartAll}
+                >
+                  <Download className="size-3.5" />
+                  Start all
+                </Button>
+              ) : null}
+            </div>
+
+            <TabsContent value="download" className="mt-4">
+              {inputUrls.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <div className="text-muted-foreground">
+                      {inputUrls.length} link{inputUrls.length === 1 ? "" : "s"}
+                    </div>
                   </div>
-                  {analysis.warnings.length > 0 ? (
-                    <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                      <Shield className="size-3.5" />
-                      {analysis.warnings[0]}
-                    </span>
-                  ) : null}
-                </div>
-
-                <div className="space-y-2">
-                  {analysis.presets.map((preset) => {
-                    const key = advancedKey(analysis.normalizedUrl, preset.id)
-                    return (
-                      <PresetRow
-                        key={preset.id}
-                        preset={preset}
-                        selected={preset.id === selectedPresetId}
-                        job={
-                          jobs.find(
-                            (job) =>
-                              job.sourceUrl === analysis.normalizedUrl &&
-                              job.presetId === preset.id
-                          ) ?? null
-                        }
-                        outputDir={settings.defaultOutputDir}
-                        auth={settings.auth}
-                        advancedOptions={
-                          advancedByPreset[key] ?? defaultAdvancedOptions
-                        }
-                        formatInfo={formatsByPreset[key] ?? null}
-                        loadingFormats={loadingFormatsKey === key}
-                        onSelect={() => setSelectedPresetId(preset.id)}
-                        onStart={() => handleStart(preset)}
-                        onCancel={(jobId) => cancelJob(jobId)}
-                        onCopyLogs={copyJobLogs}
-                        onAdvancedChange={(nextOptions) =>
-                          handleAdvancedChange(preset, nextOptions)
-                        }
-                        onLoadFormats={() => handleLoadFormats(preset)}
+                  <div
+                    className={cn(
+                      "grid gap-3",
+                      inputUrls.length > 1 &&
+                        "lg:grid-cols-[168px_minmax(0,1fr)]"
+                    )}
+                  >
+                    {inputUrls.length > 1 ? (
+                      <DownloadItemMenu
+                        items={downloadNavItems}
+                        onSelect={scrollToDownloadItem}
                       />
-                    )
-                  })}
+                    ) : null}
+
+                    <div className="space-y-3">
+                      {inputUrls.map((inputUrl) => {
+                        const analysis = analysesByUrl[inputUrl]
+                        const presetId =
+                          selectedPresetByUrl[inputUrl] ??
+                          analysis?.presets[0]?.id
+                        const preset =
+                          analysis?.presets.find(
+                            (item) => item.id === presetId
+                          ) ??
+                          analysis?.presets[0] ??
+                          null
+                        const key =
+                          analysis && preset
+                            ? advancedKey(analysis.normalizedUrl, preset.id)
+                            : inputUrl
+
+                        return (
+                          <div
+                            key={inputUrl}
+                            id={downloadItemDomId(inputUrl)}
+                            className="scroll-mt-24"
+                          >
+                            <DownloadLinkCard
+                              sourceUrl={inputUrl}
+                              analysis={analysis ?? null}
+                              analyzing={Boolean(analyzingUrls[inputUrl])}
+                              preset={preset}
+                              selectedPresetId={presetId ?? null}
+                              jobs={jobs}
+                              outputDir={settings.defaultOutputDir}
+                              auth={settings.auth}
+                              advancedOptions={
+                                advancedByPreset[key] ?? defaultAdvancedOptions
+                              }
+                              formatInfo={formatsByPreset[key] ?? null}
+                              loadingFormats={loadingFormatsKey === key}
+                              onPresetChange={(nextPresetId) =>
+                                handlePresetChange(inputUrl, nextPresetId)
+                              }
+                              onStart={() =>
+                                preset
+                                  ? handleStart(inputUrl, preset)
+                                  : undefined
+                              }
+                              onCancel={(jobId) => cancelJob(jobId)}
+                              onCopyLogs={copyJobLogs}
+                              onViewRun={openRunsForPreset}
+                              onAdvancedChange={(nextOptions) =>
+                                preset
+                                  ? handleAdvancedChange(
+                                      inputUrl,
+                                      preset,
+                                      nextOptions
+                                    )
+                                  : undefined
+                              }
+                              onLoadFormats={() =>
+                                preset
+                                  ? handleLoadFormats(inputUrl, preset)
+                                  : undefined
+                              }
+                            />
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
                 </div>
-              </motion.div>
-            ) : recentJobs.length > 0 ? (
-              <motion.div
-                layout
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 12 }}
-                className="mx-auto mt-8 w-full max-w-3xl"
-              >
-                <div className="mb-2 text-sm font-medium">Recent</div>
-                <div className="space-y-2">
-                  {recentJobs.map((job) => (
-                    <JobLine
-                      key={job.id}
-                      job={job}
-                      onCopyLogs={() => copyJobLogs(job)}
+              ) : (
+                <EmptyPanel message="Paste one or more links to configure downloads." />
+              )}
+            </TabsContent>
+
+            <TabsContent value="runs" className="mt-4" id={runsPanelDomId}>
+              {runJobs.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-card px-3 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">Runs</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Newest first
+                        {runPresetFilter !== allRunPresetsValue
+                          ? ` - ${visibleRunJobs.length} matching`
+                          : ""}
+                      </div>
+                    </div>
+                    <div className="w-full space-y-1 sm:w-72">
+                      <Label className="text-xs text-muted-foreground">
+                        Preset
+                      </Label>
+                      <Select
+                        value={runPresetFilter}
+                        onValueChange={(value) =>
+                          setRunPresetFilter(value ?? allRunPresetsValue)
+                        }
+                        items={[
+                          {
+                            value: allRunPresetsValue,
+                            label: "All presets",
+                          },
+                          ...runPresetOptions.map((option) => ({
+                            value: option.id,
+                            label: `${option.label} (${option.count})`,
+                          })),
+                        ]}
+                      >
+                        <SelectTrigger className="h-9 w-full bg-background">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent align="start">
+                          <SelectItem value={allRunPresetsValue}>
+                            All presets
+                          </SelectItem>
+                          {runPresetOptions.map((option) => (
+                            <SelectItem key={option.id} value={option.id}>
+                              {option.label} ({option.count})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {visibleRunJobs.length > 0 ? (
+                    visibleRunJobs.map((job) => (
+                      <div
+                        key={job.id}
+                        id={jobRunDomId(job.id)}
+                        className="scroll-mt-24"
+                      >
+                        <JobRunItem
+                          job={job}
+                          assets={
+                            assetsByJob[job.id]?.map((path) => ({
+                              path,
+                              job,
+                            })) ?? []
+                          }
+                          onCopyLogs={() => copyJobLogs(job)}
+                        />
+                      </div>
+                    ))
+                  ) : (
+                    <EmptyPanel message="No runs match this preset." />
+                  )}
+                </div>
+              ) : (
+                <EmptyPanel message="Started runs will appear here." />
+              )}
+            </TabsContent>
+
+            <TabsContent value="downloaded" className="mt-4">
+              {downloadedAssets.length > 0 ? (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {downloadedAssets.map((asset) => (
+                    <DownloadedAssetItem
+                      key={`${asset.job.id}:${asset.path}`}
+                      asset={asset}
+                      onCopyLogs={() => copyJobLogs(asset.job)}
                     />
                   ))}
                 </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-
-          {completedJobs.length > 0 ? (
-            <motion.div layout className="mx-auto mt-8 w-full max-w-3xl">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">Downloaded</div>
-                <div className="text-xs text-muted-foreground">
-                  {completedJobs.length} items
-                </div>
-              </div>
-              <div className="space-y-2">
-                {completedJobs.map((job) => (
-                  <DownloadedItem
-                    key={job.id}
-                    job={job}
-                    onCopyLogs={() => copyJobLogs(job)}
-                  />
-                ))}
-              </div>
-            </motion.div>
-          ) : null}
-        </motion.section>
+              ) : (
+                <EmptyPanel message="Downloaded assets will appear here." />
+              )}
+            </TabsContent>
+          </Tabs>
+        </section>
       </div>
     </main>
   )
@@ -645,6 +962,23 @@ function SettingsPanel({
 
   function setAuth(auth: AuthSource) {
     onChange({ ...settings, auth })
+  }
+
+  function setAuthMode(nextMode: string | null) {
+    if (nextMode === "browser") {
+      setAuth({
+        kind: "browser",
+        browser: selectedBrowsers[0]?.browser ?? "firefox",
+        browsers:
+          selectedBrowsers.length > 0
+            ? selectedBrowsers
+            : [{ browser: "firefox" }],
+      })
+    } else if (nextMode === "cookie_file") {
+      setAuth({ kind: "cookie_file", path: cookieFile })
+    } else {
+      setAuth({ kind: "none" })
+    }
   }
 
   function setBrowserEnabled(browser: BrowserKind, enabled: boolean) {
@@ -686,32 +1020,27 @@ function SettingsPanel({
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <label className="space-y-1 text-xs text-muted-foreground">
-          Auth
-          <select
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Auth</Label>
+          <Select
             value={authMode}
-            onChange={(event) => {
-              const next = event.target.value
-              if (next === "browser") {
-                setAuth({
-                  kind: "browser",
-                  browser: selectedBrowsers[0]?.browser ?? "firefox",
-                  browsers:
-                    selectedBrowsers.length > 0
-                      ? selectedBrowsers
-                      : [{ browser: "firefox" }],
-                })
-              } else if (next === "cookie_file") {
-                setAuth({ kind: "cookie_file", path: cookieFile })
-              } else setAuth({ kind: "none" })
-            }}
-            className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none"
+            onValueChange={setAuthMode}
+            items={[
+              { value: "browser", label: "Browser cookies" },
+              { value: "cookie_file", label: "cookies.txt" },
+              { value: "none", label: "None" },
+            ]}
           >
-            <option value="browser">Browser cookies</option>
-            <option value="cookie_file">cookies.txt</option>
-            <option value="none">None</option>
-          </select>
-        </label>
+            <SelectTrigger className="h-9 w-full bg-background">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              <SelectItem value="browser">Browser cookies</SelectItem>
+              <SelectItem value="cookie_file">cookies.txt</SelectItem>
+              <SelectItem value="none">None</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         <div className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
           Browser fallback
@@ -728,14 +1057,12 @@ function SettingsPanel({
                     authMode !== "browser" && "opacity-50"
                   )}
                 >
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={checked}
                     disabled={authMode !== "browser"}
-                    onChange={(event) =>
-                      setBrowserEnabled(browserName, event.target.checked)
+                    onCheckedChange={(nextChecked) =>
+                      setBrowserEnabled(browserName, nextChecked)
                     }
-                    className="size-3.5"
                   />
                   {browserName}
                 </label>
@@ -767,147 +1094,234 @@ function SettingsPanel({
   )
 }
 
-type PresetRowProps = {
-  preset: Preset
-  selected: boolean
-  job: Job | null
+function DownloadItemMenu({
+  items,
+  onSelect,
+}: {
+  items: DownloadNavigatorItem[]
+  onSelect: (sourceUrl: string) => void
+}) {
+  return (
+    <nav
+      aria-label="Download items"
+      className="min-w-0 lg:sticky lg:top-4 lg:self-start"
+    >
+      <div className="rounded-lg border bg-card p-2">
+        <div className="mb-2 flex items-center gap-2 px-2 text-xs font-medium text-muted-foreground">
+          <List className="size-3.5" />
+          Items
+        </div>
+        <div className="flex gap-2 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+          {items.map((item) => (
+            <Button
+              key={item.id}
+              type="button"
+              variant="ghost"
+              className="h-auto min-w-40 justify-start gap-2 px-2 py-2 lg:w-full lg:min-w-0"
+              onClick={() => onSelect(item.sourceUrl)}
+            >
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md border bg-background text-xs font-medium">
+                {item.index}
+              </span>
+              <span className="min-w-0 text-left">
+                <span className="block truncate text-xs font-medium text-foreground">
+                  {item.siteLabel}
+                </span>
+                <span className="block truncate text-[11px] text-muted-foreground">
+                  {item.title}
+                </span>
+              </span>
+              <span className="sr-only">{item.status}</span>
+            </Button>
+          ))}
+        </div>
+      </div>
+    </nav>
+  )
+}
+
+type DownloadLinkCardProps = {
+  sourceUrl: string
+  analysis: AnalyzeResult | null
+  analyzing: boolean
+  preset: Preset | null
+  selectedPresetId: string | null
+  jobs: Job[]
   outputDir?: string | null
   auth: AuthSource
   advancedOptions: AdvancedDownloadOptions
   formatInfo: FormatAnalysis | null
   loadingFormats: boolean
-  onSelect: () => void
+  onPresetChange: (presetId: string | null) => void
   onStart: () => void
   onCancel: (jobId: string) => void
   onCopyLogs: (job: Job) => void
+  onViewRun: (presetId: string) => void
   onAdvancedChange: (options: AdvancedDownloadOptions) => void
   onLoadFormats: () => void
 }
 
-function PresetRow({
+function DownloadLinkCard({
+  sourceUrl,
+  analysis,
+  analyzing,
   preset,
-  selected,
-  job,
+  selectedPresetId,
+  jobs,
   outputDir,
   auth,
   advancedOptions,
   formatInfo,
   loadingFormats,
-  onSelect,
+  onPresetChange,
   onStart,
   onCancel,
   onCopyLogs,
+  onViewRun,
   onAdvancedChange,
   onLoadFormats,
-}: PresetRowProps) {
+}: DownloadLinkCardProps) {
+  const job =
+    analysis && preset
+      ? (jobs.find(
+          (item) =>
+            item.sourceUrl === analysis.normalizedUrl &&
+            item.presetId === preset.id
+        ) ?? null)
+      : null
   const running =
     job && !["completed", "failed", "canceled"].includes(job.status)
+  const presetAuth = preset?.auth ?? "none"
   const canUseAuth = isAuthConfigured(auth)
 
   return (
-    <motion.div
-      layout
-      className={cn(
-        "overflow-hidden rounded-lg border bg-card transition-colors",
-        selected && "border-foreground/25"
-      )}
-    >
-      <button
-        type="button"
-        onClick={onSelect}
-        className="grid w-full grid-cols-[1fr_auto] items-center gap-3 px-4 py-3 text-left"
-      >
-        <div className="min-w-0">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="truncate text-sm font-medium">{preset.label}</span>
+    <div className="rounded-lg border bg-card p-4">
+      <div className="grid gap-3 lg:grid-cols-[1fr_220px]">
+        <div className="min-w-0 space-y-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+            {analysis ? (
+              <span className="rounded-md border bg-muted px-2 py-1 font-medium">
+                {siteLabels[analysis.siteKind]}
+              </span>
+            ) : null}
             <span className="rounded border bg-muted px-1.5 py-0.5 text-[11px] tracking-normal text-muted-foreground uppercase">
               video
             </span>
             <span className="rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
-              {authLabels[preset.auth]}
+              {authLabels[presetAuth]}
             </span>
+            {analyzing ? (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Loader2 className="size-3 animate-spin" />
+                Inspecting
+              </span>
+            ) : null}
           </div>
-          <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-            {preset.description}
-          </p>
-        </div>
-        <ChevronRight
-          className={cn(
-            "size-4 text-muted-foreground transition-transform",
-            selected && "rotate-90"
-          )}
-        />
-      </button>
-
-      <AnimatePresence initial={false}>
-        {selected ? (
-          <motion.div
-            layout
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="border-t"
-          >
-            <div className="space-y-3 px-4 py-4">
-              {job ? (
-                <JobProgress job={job} onCopyLogs={() => onCopyLogs(job)} />
-              ) : null}
-
-              {!running ? (
-                <>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-                      <div className="text-xs text-muted-foreground">
-                        Output
-                      </div>
-                      <div className="mt-0.5 truncate">
-                        {outputDir ?? "Downloads"}
-                      </div>
-                    </div>
-                    <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-                      <div className="text-xs text-muted-foreground">Auth</div>
-                      <div className="mt-0.5 truncate">
-                        {authLabel(auth)}
-                        {preset.auth === "required" && !canUseAuth
-                          ? " required"
-                          : ""}
-                      </div>
-                    </div>
-                  </div>
-
-                  <AdvancedDownloadPanel
-                    options={advancedOptions}
-                    formatInfo={formatInfo}
-                    loadingFormats={loadingFormats}
-                    onChange={onAdvancedChange}
-                    onLoadFormats={onLoadFormats}
-                  />
-
-                  <div className="flex justify-end">
-                    <Button type="button" className="gap-2" onClick={onStart}>
-                      <Download className="size-4" />
-                      Start
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                <div className="flex justify-end">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="gap-2"
-                    onClick={() => onCancel(job.id)}
-                  >
-                    <Square className="size-3.5" />
-                    Stop
-                  </Button>
-                </div>
-              )}
+          <div className="truncate text-sm font-medium">{sourceUrl}</div>
+          {analysis?.warnings.length ? (
+            <div className="flex items-center gap-1.5 text-xs text-amber-700">
+              <Shield className="size-3.5" />
+              {analysis.warnings[0]}
             </div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
-    </motion.div>
+          ) : null}
+        </div>
+
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Preset</Label>
+          {analysis && analysis.presets.length > 0 ? (
+            <Select
+              value={selectedPresetId}
+              onValueChange={onPresetChange}
+              items={analysis.presets.map((item) => ({
+                value: item.id,
+                label: item.label,
+              }))}
+            >
+              <SelectTrigger className="h-9 w-full bg-background">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="start">
+                {analysis.presets.map((item) => (
+                  <SelectItem key={item.id} value={item.id}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <div className="flex h-9 items-center rounded-md border bg-background px-2 text-sm text-muted-foreground">
+              {analyzing ? "Inspecting" : "No preset"}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {preset ? (
+        <div className="mt-4 space-y-3">
+          {job ? (
+            <JobProgress
+              job={job}
+              onCopyLogs={() => onCopyLogs(job)}
+              onViewRun={() => preset && onViewRun(preset.id)}
+            />
+          ) : null}
+
+          {!running ? (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
+                  <div className="text-xs text-muted-foreground">Output</div>
+                  <div className="mt-0.5 truncate">
+                    {outputDir ?? "Downloads"}
+                  </div>
+                </div>
+                <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
+                  <div className="text-xs text-muted-foreground">Auth</div>
+                  <div className="mt-0.5 truncate">
+                    {authLabel(auth)}
+                    {preset.auth === "required" && !canUseAuth
+                      ? " required"
+                      : ""}
+                  </div>
+                </div>
+              </div>
+
+              <AdvancedDownloadPanel
+                options={advancedOptions}
+                formatInfo={formatInfo}
+                loadingFormats={loadingFormats}
+                onChange={onAdvancedChange}
+                onLoadFormats={onLoadFormats}
+              />
+
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  className="gap-2"
+                  disabled={analyzing}
+                  onClick={onStart}
+                >
+                  <Download className="size-4" />
+                  Start
+                </Button>
+              </div>
+            </>
+          ) : (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                className="gap-2"
+                onClick={() => onCancel(job.id)}
+              >
+                <Square className="size-3.5" />
+                Stop
+              </Button>
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -929,15 +1343,76 @@ function AdvancedDownloadPanel({
   const videoFormats = (formatInfo?.formats ?? []).filter(
     (format) => format.hasVideo
   )
-  const selectedFormatId =
-    options.format.kind === "format"
-      ? options.format.formatId
-      : options.format.kind === "video_only"
-        ? (options.format.formatId ?? "")
-        : ""
+  const selectedQualityValue = qualityValueFromFormat(options.format)
+  const videoEnabled = videoEnabledFromFormat(options.format)
+  const audioEnabled = audioEnabledFromFormat(options.format)
+  const selectedVideoQualityValue = videoQualityValueFromFormat(
+    selectedQualityValue,
+    videoFormats
+  )
+  const selectedQualityLoaded =
+    selectedQualityValue === autoQualityValue ||
+    videoFormats.some((format) => format.formatId === selectedQualityValue)
+  const videoQualityItems = videoQualitySelectItems(
+    videoFormats,
+    selectedVideoQualityValue,
+    selectedQualityValue
+  )
+  const exactFormatItems = [
+    { value: autoQualityValue, label: "Auto format" },
+    ...(!selectedQualityLoaded && selectedQualityValue !== autoQualityValue
+      ? [
+          {
+            value: selectedQualityValue,
+            label: `Selected format ${selectedQualityValue}`,
+          },
+        ]
+      : []),
+    ...formatsForVideoQuality(videoFormats, selectedVideoQualityValue).map(
+      (format) => ({
+        value: format.formatId,
+        label: format.label,
+      })
+    ),
+  ]
 
-  function setFormat(format: AdvancedDownloadOptions["format"]) {
+  function setFormat(format: FormatSelection) {
     onChange({ ...options, format })
+  }
+
+  function setVideoEnabled(nextEnabled: boolean) {
+    if (!nextEnabled && !audioEnabled) return
+    setFormat(
+      formatFromControls(nextEnabled, audioEnabled, selectedQualityValue)
+    )
+  }
+
+  function setAudioEnabled(nextEnabled: boolean) {
+    if (!nextEnabled && !videoEnabled) return
+    setFormat(
+      formatFromControls(videoEnabled, nextEnabled, selectedQualityValue)
+    )
+  }
+
+  function setVideoQuality(nextQualityValue: string | null) {
+    const qualityValue = nextQualityValue ?? autoQualityValue
+    const nextFormat =
+      qualityValue === autoQualityValue
+        ? autoQualityValue
+        : (bestFormatForVideoQuality(videoFormats, qualityValue)?.formatId ??
+          autoQualityValue)
+
+    setFormat(formatFromControls(videoEnabled, audioEnabled, nextFormat))
+  }
+
+  function setQuality(nextQualityValue: string | null) {
+    setFormat(
+      formatFromControls(
+        videoEnabled,
+        audioEnabled,
+        nextQualityValue ?? autoQualityValue
+      )
+    )
   }
 
   function setSegment(
@@ -962,101 +1437,131 @@ function AdvancedDownloadPanel({
           <SlidersHorizontal className="size-4" />
           Advanced
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7 gap-1.5 px-2 text-xs"
-          disabled={loadingFormats}
-          onClick={onLoadFormats}
-        >
-          {loadingFormats ? (
-            <Loader2 className="size-3 animate-spin" />
-          ) : (
-            <RefreshCw className="size-3" />
-          )}
-          Formats
-        </Button>
       </div>
 
-      <div className="grid grid-cols-4 gap-1 rounded-md border bg-muted p-1">
-        <ModeButton
-          active={options.format.kind === "best"}
-          icon={<Download className="size-3.5" />}
-          label="Best"
-          onClick={() => setFormat({ kind: "best" })}
-        />
-        <ModeButton
-          active={options.format.kind === "format"}
-          icon={<Film className="size-3.5" />}
-          label="Quality"
-          onClick={() =>
-            setFormat({
-              kind: "format",
-              formatId: videoFormats[0]?.formatId ?? selectedFormatId,
-            })
-          }
-        />
-        <ModeButton
-          active={options.format.kind === "audio_only"}
-          icon={<Music className="size-3.5" />}
-          label="Audio"
-          onClick={() => setFormat({ kind: "audio_only" })}
-        />
-        <ModeButton
-          active={options.format.kind === "video_only"}
-          icon={<Film className="size-3.5" />}
-          label="Video"
-          onClick={() =>
-            setFormat({
-              kind: "video_only",
-              formatId: videoFormats[0]?.formatId ?? selectedFormatId,
-            })
-          }
-        />
+      <div className="space-y-2">
+        <Label className="text-xs text-muted-foreground">Streams</Label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
+            <Checkbox
+              checked={videoEnabled}
+              disabled={videoEnabled && !audioEnabled}
+              onCheckedChange={(checked) => setVideoEnabled(Boolean(checked))}
+            />
+            <Film className="size-3.5 text-muted-foreground" />
+            Video
+          </Label>
+          <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
+            <Checkbox
+              checked={audioEnabled}
+              disabled={audioEnabled && !videoEnabled}
+              onCheckedChange={(checked) => setAudioEnabled(Boolean(checked))}
+            />
+            <Music className="size-3.5 text-muted-foreground" />
+            Audio
+          </Label>
+        </div>
       </div>
 
-      {options.format.kind === "format" ||
-      options.format.kind === "video_only" ? (
-        <label className="mt-3 block space-y-1 text-xs text-muted-foreground">
-          Quality
-          <select
-            value={selectedFormatId}
-            onChange={(event) => {
-              const formatId = event.target.value
-              if (options.format.kind === "video_only") {
-                setFormat({ kind: "video_only", formatId })
-              } else {
-                setFormat({ kind: "format", formatId })
-              }
-            }}
-            className="h-9 w-full rounded-md border bg-card px-2 text-sm text-foreground outline-none"
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label className="text-xs text-muted-foreground">Video quality</Label>
+          <Select
+            value={selectedVideoQualityValue}
+            onValueChange={setVideoQuality}
+            disabled={!videoEnabled}
+            items={videoQualityItems}
           >
-            {videoFormats.length === 0 ? (
-              <option value="">Load formats first</option>
-            ) : null}
-            {videoFormats.map((format) => (
-              <option key={format.formatId} value={format.formatId}>
-                {format.label}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger className="h-9 w-full bg-card">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              {videoQualityItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-xs text-muted-foreground">Format</Label>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 px-2 text-xs"
+              disabled={loadingFormats || !videoEnabled}
+              onClick={onLoadFormats}
+            >
+              {loadingFormats ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3" />
+              )}
+              Load
+            </Button>
+          </div>
+          <Select
+            value={selectedQualityValue}
+            onValueChange={setQuality}
+            disabled={!videoEnabled}
+            items={exactFormatItems}
+          >
+            <SelectTrigger className="h-9 w-full bg-card">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              {exactFormatItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      {!videoEnabled ? (
+        <div className="mt-3 text-xs text-muted-foreground">
+          Audio uses the best available audio stream.
+        </div>
+      ) : videoFormats.length === 0 ? (
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            Load formats to choose exact video quality and stream format.
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            disabled={loadingFormats}
+            onClick={onLoadFormats}
+          >
+            {loadingFormats ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3" />
+            )}
+            Load formats
+          </Button>
+        </div>
       ) : null}
 
       <div className="mt-3 rounded-md border bg-card p-3">
-        <label className="flex items-center justify-between gap-3 text-sm">
+        <Label className="flex items-center justify-between gap-3 text-sm">
           <span className="flex items-center gap-2 font-medium">
             <Scissors className="size-4" />
             Segment
           </span>
-          <input
-            type="checkbox"
+          <Switch
             checked={Boolean(segment?.enabled)}
-            onChange={(event) => enableSegment(event.target.checked)}
-            className="size-4"
+            onCheckedChange={enableSegment}
           />
-        </label>
+        </Label>
 
         {segment?.enabled ? (
           <div className="mt-3 space-y-3">
@@ -1106,32 +1611,6 @@ function AdvancedDownloadPanel({
   )
 }
 
-function ModeButton({
-  active,
-  icon,
-  label,
-  onClick,
-}: {
-  active: boolean
-  icon: ReactNode
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "flex h-8 items-center justify-center gap-1.5 rounded px-2 text-xs",
-        active ? "bg-background shadow-sm" : "text-muted-foreground"
-      )}
-    >
-      {icon}
-      {label}
-    </button>
-  )
-}
-
 function SegmentRange({
   duration,
   start,
@@ -1146,42 +1625,25 @@ function SegmentRange({
   const safeDuration = Math.max(duration, 1)
   const safeStart = clamp(start, 0, safeDuration)
   const safeEnd = clamp(Math.max(end, safeStart), 0, safeDuration)
-  const startPercent = (safeStart / safeDuration) * 100
-  const endPercent = (safeEnd / safeDuration) * 100
 
   return (
-    <div className="relative h-8">
-      <div className="absolute top-3 right-0 left-0 h-2 rounded-full bg-muted" />
-      <div
-        className="absolute top-3 h-2 rounded-full bg-foreground"
-        style={{
-          left: `${startPercent}%`,
-          width: `${Math.max(0, endPercent - startPercent)}%`,
-        }}
-      />
-      <input
-        type="range"
-        min={0}
-        max={safeDuration}
-        step={0.1}
-        value={safeStart}
-        onChange={(event) =>
-          onChange(Math.min(Number(event.target.value), safeEnd), safeEnd)
-        }
-        className="pointer-events-none absolute inset-x-0 top-0 h-8 w-full appearance-none bg-transparent [&::-moz-range-thumb]:pointer-events-auto [&::-moz-range-thumb]:size-4 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4"
-      />
-      <input
-        type="range"
-        min={0}
-        max={safeDuration}
-        step={0.1}
-        value={safeEnd}
-        onChange={(event) =>
-          onChange(safeStart, Math.max(Number(event.target.value), safeStart))
-        }
-        className="pointer-events-none absolute inset-x-0 top-0 h-8 w-full appearance-none bg-transparent [&::-moz-range-thumb]:pointer-events-auto [&::-moz-range-thumb]:size-4 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:size-4"
-      />
-    </div>
+    <Slider
+      value={[safeStart, safeEnd]}
+      min={0}
+      max={safeDuration}
+      step={0.1}
+      minStepsBetweenValues={0}
+      thumbCollisionBehavior="none"
+      className="py-3"
+      onValueChange={(nextValue) => {
+        const [nextStart = safeStart, nextEnd = safeEnd] = Array.isArray(
+          nextValue
+        )
+          ? nextValue
+          : [safeStart, safeEnd]
+        onChange(Math.min(nextStart, nextEnd), Math.max(nextStart, nextEnd))
+      }}
+    />
   )
 }
 
@@ -1219,9 +1681,11 @@ function TimeInput({
 function JobProgress({
   job,
   onCopyLogs,
+  onViewRun,
 }: {
   job: Job
   onCopyLogs: () => void
+  onViewRun: () => void
 }) {
   const done = job.status === "completed"
   const failed = job.status === "failed"
@@ -1246,12 +1710,24 @@ function JobProgress({
           </span>
           <Button
             type="button"
-            size="icon-xs"
+            size="xs"
             variant="outline"
+            className="gap-1.5"
+            onClick={onViewRun}
+          >
+            <List className="size-3" />
+            Run
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="gap-1.5"
             aria-label="Copy logs"
             onClick={onCopyLogs}
           >
             <Clipboard className="size-3" />
+            Logs
           </Button>
         </div>
       </div>
@@ -1264,167 +1740,246 @@ function JobProgress({
           style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}
         />
       </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-        {job.speed ? <span>{job.speed}</span> : null}
-        {job.eta ? <span>ETA {job.eta}</span> : null}
+      <div className="mt-2 grid min-w-0 gap-1 text-xs text-muted-foreground">
+        {job.speed || job.eta ? (
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {job.speed ? <span>{job.speed}</span> : null}
+            {job.eta ? <span>ETA {job.eta}</span> : null}
+          </div>
+        ) : null}
         {job.outputPath ? (
-          <span className="truncate">{job.outputPath}</span>
+          <div className="min-w-0 truncate" title={job.outputPath}>
+            {job.outputPath}
+          </div>
         ) : null}
         {job.errorMessage ? (
-          <span className="text-destructive">{job.errorMessage}</span>
+          <div
+            className="min-w-0 truncate text-destructive"
+            title={job.errorMessage}
+          >
+            {job.errorMessage}
+          </div>
         ) : null}
       </div>
     </div>
   )
 }
 
-function JobLine({ job, onCopyLogs }: { job: Job; onCopyLogs: () => void }) {
+function JobRunItem({
+  job,
+  assets,
+  onCopyLogs,
+}: {
+  job: Job
+  assets: DownloadAsset[]
+  onCopyLogs: () => void
+}) {
   return (
-    <div className="grid grid-cols-[1fr_auto_auto] items-center gap-3 rounded-lg border bg-card px-4 py-3">
-      <div className="min-w-0">
-        <div className="truncate text-sm font-medium">
-          {siteLabels[job.site]} - {job.presetId}
+    <div className="rounded-lg border bg-card p-4">
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-center">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">
+            {siteLabels[job.site]} - {job.presetId}
+          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">
+            {job.sourceUrl}
+          </div>
         </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
-          {job.phase}
+        <span className="w-fit rounded border bg-muted px-2 py-1 text-xs text-muted-foreground capitalize">
+          {job.status}
+        </span>
+        <div className="flex items-center justify-end">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="gap-1.5"
+            aria-label="Copy logs"
+            onClick={onCopyLogs}
+          >
+            <Clipboard className="size-3" />
+            Logs
+          </Button>
         </div>
       </div>
-      <span className="rounded border bg-muted px-2 py-1 text-xs text-muted-foreground capitalize">
-        {job.status}
-      </span>
+
+      <div className="mt-3 text-xs text-muted-foreground">{job.phase}</div>
+      {assets.length > 0 ? (
+        <div className="mt-3">
+          <AssetCarousel assets={assets} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function AssetCarousel({ assets }: { assets: DownloadAsset[] }) {
+  const [index, setIndex] = useState(0)
+  const safeIndex = clamp(index, 0, Math.max(assets.length - 1, 0))
+  const asset = assets[safeIndex]
+
+  if (!asset) return null
+
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="grid gap-3 md:grid-cols-[280px_1fr]">
+        <AssetPreview path={asset.path} />
+        <div className="flex min-w-0 flex-col justify-between gap-3">
+          <div className="min-w-0">
+            <div
+              className="truncate text-sm font-medium"
+              title={fileNameFromPath(asset.path)}
+            >
+              {fileNameFromPath(asset.path)}
+            </div>
+            <div
+              className="mt-1 truncate text-xs text-muted-foreground"
+              title={asset.path}
+            >
+              {asset.path}
+            </div>
+          </div>
+          <AssetActions path={asset.path} />
+        </div>
+      </div>
+
+      {assets.length > 1 ? (
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => setIndex(Math.max(0, safeIndex - 1))}
+          >
+            <ChevronLeft className="size-3" />
+            Prev
+          </Button>
+          <div className="text-xs text-muted-foreground">
+            {safeIndex + 1} / {assets.length}
+          </div>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => setIndex(Math.min(assets.length - 1, safeIndex + 1))}
+          >
+            Next
+            <ChevronRight className="size-3" />
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function DownloadedAssetItem({
+  asset,
+  onCopyLogs,
+}: {
+  asset: DownloadAsset
+  onCopyLogs: () => void
+}) {
+  return (
+    <div className="rounded-lg border bg-card p-3">
+      <AssetPreview path={asset.path} />
+      <div className="mt-3 min-w-0">
+        <div
+          className="truncate text-sm font-medium"
+          title={fileNameFromPath(asset.path)}
+        >
+          {fileNameFromPath(asset.path)}
+        </div>
+        <div className="mt-1 truncate text-xs text-muted-foreground">
+          {siteLabels[asset.job.site]} - {asset.job.presetId}
+        </div>
+        <div
+          className="mt-1 truncate text-xs text-muted-foreground"
+          title={asset.path}
+        >
+          {asset.path}
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <AssetActions path={asset.path} />
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          className="gap-1.5"
+          onClick={onCopyLogs}
+        >
+          <Clipboard className="size-3" />
+          Logs
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function AssetPreview({ path }: { path: string }) {
+  const previewUrl = pathToPreviewUrl(path)
+
+  return (
+    <div className="relative aspect-video overflow-hidden rounded-md border bg-muted">
+      {previewUrl ? (
+        <video
+          src={previewUrl}
+          className="h-full w-full object-contain"
+          controls
+          preload="metadata"
+        />
+      ) : (
+        <div className="flex h-full items-center justify-center">
+          <Download className="size-5 text-muted-foreground" />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssetActions({ path }: { path: string }) {
+  return (
+    <div className="flex flex-wrap gap-2">
       <Button
         type="button"
-        size="icon-xs"
+        size="xs"
         variant="outline"
-        aria-label="Copy logs"
-        onClick={onCopyLogs}
+        className="gap-1.5"
+        onClick={() => revealOutputPath(path)}
       >
-        <Clipboard className="size-3" />
+        <FolderOpen className="size-3" />
+        Show
+      </Button>
+      <Button
+        type="button"
+        size="xs"
+        variant="outline"
+        className="gap-1.5"
+        onClick={() => openOutputPath(path)}
+      >
+        <Play className="size-3" />
+        Open
+      </Button>
+      <Button
+        type="button"
+        size="xs"
+        variant="outline"
+        className="gap-1.5"
+        onClick={() => copyText(path)}
+      >
+        <Copy className="size-3" />
+        Path
       </Button>
     </div>
   )
 }
 
-function DownloadedItem({
-  job,
-  onCopyLogs,
-}: {
-  job: Job
-  onCopyLogs: () => void
-}) {
-  const [thumbnail, setThumbnail] = useState<{
-    sourcePath: string
-    thumbnailPath: string | null
-  } | null>(null)
-  const previewUrl = job.outputPath ? pathToPreviewUrl(job.outputPath) : null
-  const thumbnailPath =
-    thumbnail && thumbnail.sourcePath === job.outputPath
-      ? thumbnail.thumbnailPath
-      : null
-  const thumbnailUrl = thumbnailPath ? localFilePreviewUrl(thumbnailPath) : null
-
-  useEffect(() => {
-    let canceled = false
-    if (!job.outputPath || !isLikelyVideoPath(job.outputPath)) return
-
-    const sourcePath = job.outputPath
-    createVideoThumbnail(sourcePath)
-      .then((path) => {
-        if (!canceled) setThumbnail({ sourcePath, thumbnailPath: path })
-      })
-      .catch(() => undefined)
-
-    return () => {
-      canceled = true
-    }
-  }, [job.outputPath])
-
+function EmptyPanel({ message }: { message: string }) {
   return (
-    <div className="grid gap-3 rounded-lg border bg-card p-3 sm:grid-cols-[168px_1fr_auto]">
-      <button
-        type="button"
-        disabled={!job.outputPath}
-        onClick={() => job.outputPath && revealOutputPath(job.outputPath)}
-        className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-muted text-left disabled:cursor-default"
-      >
-        {thumbnailUrl ? (
-          <img
-            src={thumbnailUrl}
-            className="h-full w-full object-cover"
-            alt=""
-            draggable={false}
-          />
-        ) : previewUrl ? (
-          <video
-            src={previewUrl}
-            className="h-full w-full object-cover"
-            muted
-          />
-        ) : (
-          <Download className="size-5 text-muted-foreground" />
-        )}
-        <span className="absolute right-2 bottom-2 flex size-6 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm">
-          <FolderOpen className="size-3.5" />
-        </span>
-      </button>
-
-      <div className="min-w-0 self-center">
-        <div className="truncate text-sm font-medium">
-          {siteLabels[job.site]} - {job.presetId}
-        </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
-          {job.outputPath ?? job.sourceUrl}
-        </div>
-        <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
-          <span className="rounded border bg-muted px-1.5 py-0.5">video</span>
-          <span className="rounded border bg-muted px-1.5 py-0.5">
-            completed
-          </span>
-        </div>
-      </div>
-
-      <div className="flex items-start justify-end gap-2 sm:flex-col">
-        {job.outputPath ? (
-          <>
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="outline"
-              aria-label="Show in folder"
-              onClick={() => revealOutputPath(job.outputPath ?? "")}
-            >
-              <FolderOpen className="size-3" />
-            </Button>
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="outline"
-              aria-label="Open in default app"
-              onClick={() => openOutputPath(job.outputPath ?? "")}
-            >
-              <Play className="size-3" />
-            </Button>
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="outline"
-              aria-label="Copy file path"
-              onClick={() => copyText(job.outputPath ?? "")}
-            >
-              <Copy className="size-3" />
-            </Button>
-          </>
-        ) : null}
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="outline"
-          aria-label="Copy logs"
-          onClick={onCopyLogs}
-        >
-          <Clipboard className="size-3" />
-        </Button>
-      </div>
+    <div className="rounded-lg border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
+      {message}
     </div>
   )
 }
@@ -1462,8 +2017,202 @@ function browserSources(auth: AuthSource): BrowserAuthSource[] {
   return auth.browser ? [{ browser: auth.browser, profile: auth.profile }] : []
 }
 
+function extractUrls(input: string): string[] {
+  const matches = input.match(/https?:\/\/[^\s<>"']+/g) ?? []
+  return uniqueStrings(
+    matches
+      .map((match) => match.replace(/[),.;\]]+$/g, ""))
+      .filter(looksLikeUrl)
+  )
+}
+
+function downloadItemDomId(sourceUrl: string): string {
+  return `download-item-${stableHash(sourceUrl)}`
+}
+
+function jobRunDomId(jobId: string): string {
+  return `run-job-${jobId}`
+}
+
+function stableHash(value: string): string {
+  let hash = 5381
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 33) ^ value.charCodeAt(index)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function compactUrlLabel(input: string): string {
+  try {
+    const parsed = new URL(input)
+    const leaf = parsed.pathname.split("/").filter(Boolean).at(-1)
+    return leaf ? `${parsed.hostname}/${leaf}` : parsed.hostname
+  } catch {
+    return input
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    if (seen.has(value)) return false
+    seen.add(value)
+    return true
+  })
+}
+
+function runPresetOptionsFromJobs(
+  jobs: Job[],
+  knownLabels: Record<string, string>
+): Array<{ id: string; label: string; count: number }> {
+  const counts = new Map<string, number>()
+  jobs.forEach((job) => {
+    counts.set(job.presetId, (counts.get(job.presetId) ?? 0) + 1)
+  })
+
+  return Array.from(counts.entries()).map(([id, count]) => ({
+    id,
+    count,
+    label: knownLabels[id] ?? humanPresetId(id),
+  }))
+}
+
+function humanPresetId(presetId: string): string {
+  return presetId
+    .split("-")
+    .filter((part) => part.length > 0)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
+function assetPathsFromJob(job: Job, logs: JobLog[] = []): string[] {
+  return uniqueStrings(
+    [
+      job.outputPath ?? "",
+      ...logs.map((log) => parseOutputPathFromLog(log.message) ?? ""),
+    ].filter(Boolean)
+  )
+}
+
+function parseOutputPathFromLog(message: string): string | null {
+  const patterns = [
+    /^\[download\] Destination: (.+)$/,
+    /^\[Merger\] Merging formats into "(.+)"$/,
+    /^\[download\] (.+) has already been downloaded$/,
+  ]
+
+  for (const pattern of patterns) {
+    const match = message.match(pattern)
+    if (match?.[1]) return match[1]
+  }
+  return null
+}
+
+function fileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
+}
+
 function advancedKey(url: string, presetId: string): string {
   return `${url}::${presetId}`
+}
+
+function videoEnabledFromFormat(format: FormatSelection): boolean {
+  return format.kind !== "audio_only"
+}
+
+function audioEnabledFromFormat(format: FormatSelection): boolean {
+  return format.kind !== "video_only"
+}
+
+function qualityValueFromFormat(format: FormatSelection): string {
+  if (format.kind === "format" && format.formatId.trim()) {
+    return format.formatId
+  }
+  if (format.kind === "video_only" && format.formatId?.trim()) {
+    return format.formatId
+  }
+  return autoQualityValue
+}
+
+function videoQualityValueFromFormat(
+  formatId: string,
+  formats: FormatOption[]
+): string {
+  if (formatId === autoQualityValue) return autoQualityValue
+  const format = formats.find((item) => item.formatId === formatId)
+  if (format?.height) return `height:${format.height}`
+  return `format:${formatId}`
+}
+
+function videoQualitySelectItems(
+  formats: FormatOption[],
+  selectedQualityValue: string,
+  selectedFormatId: string
+): Array<{ value: string; label: string }> {
+  const heights = uniqueStrings(
+    formats
+      .map((format) => format.height)
+      .filter((height): height is number => Boolean(height))
+      .sort((left, right) => right - left)
+      .map((height) => String(height))
+  )
+  const items = [
+    { value: autoQualityValue, label: "Auto best quality" },
+    ...heights.map((height) => ({
+      value: `height:${height}`,
+      label: `${height}p`,
+    })),
+  ]
+
+  if (
+    selectedQualityValue.startsWith("format:") &&
+    selectedFormatId !== autoQualityValue
+  ) {
+    items.splice(1, 0, {
+      value: selectedQualityValue,
+      label: `Selected format ${selectedFormatId}`,
+    })
+  }
+
+  return items
+}
+
+function formatsForVideoQuality(
+  formats: FormatOption[],
+  qualityValue: string
+): FormatOption[] {
+  if (!qualityValue.startsWith("height:")) return formats
+  const height = Number(qualityValue.slice("height:".length))
+  return formats.filter((format) => format.height === height)
+}
+
+function bestFormatForVideoQuality(
+  formats: FormatOption[],
+  qualityValue: string
+): FormatOption | null {
+  const candidates = formatsForVideoQuality(formats, qualityValue)
+  return (
+    candidates.toSorted((left, right) => {
+      const rightTbr = right.tbr ?? 0
+      const leftTbr = left.tbr ?? 0
+      return rightTbr - leftTbr
+    })[0] ?? null
+  )
+}
+
+function formatFromControls(
+  videoEnabled: boolean,
+  audioEnabled: boolean,
+  qualityValue: string
+): FormatSelection {
+  const formatId = qualityValue === autoQualityValue ? "" : qualityValue.trim()
+
+  if (audioEnabled && !videoEnabled) return { kind: "audio_only" }
+  if (videoEnabled && !audioEnabled) {
+    return { kind: "video_only", formatId: formatId || null }
+  }
+  if (formatId) return { kind: "format", formatId }
+  return { kind: "best" }
 }
 
 function normalizeAdvancedForDuration(

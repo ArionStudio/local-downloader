@@ -31,7 +31,8 @@ export const presets: Preset[] = [
     id: "reddit-post-video-highest",
     siteKinds: ["reddit"],
     label: "Reddit Post Video",
-    description: "Download the highest quality video from a single Reddit post.",
+    description:
+      "Download the highest quality video from a single Reddit post.",
     outputKind: "video",
     pipeline: "yt_dlp",
     auth: "optional",
@@ -49,7 +50,8 @@ export const presets: Preset[] = [
     id: "youtube-video-highest",
     siteKinds: ["youtube"],
     label: "YouTube Video",
-    description: "Download the highest quality YouTube video and retry with saved auth only if needed.",
+    description:
+      "Download the highest quality YouTube video and retry with saved auth only if needed.",
     outputKind: "video",
     pipeline: "yt_dlp",
     auth: "recommended",
@@ -76,7 +78,18 @@ export const presets: Preset[] = [
     id: "linkedin-feed-update-video-highest",
     siteKinds: ["linkedin"],
     label: "LinkedIn Feed Update",
-    description: "Use local cookies for feed update activity URLs.",
+    description:
+      "Use local cookies to resolve the DASH stream from feed update metadata.",
+    outputKind: "video",
+    pipeline: "http_resolve_then_download",
+    auth: "required",
+  },
+  {
+    id: "crunchyroll-video-highest",
+    siteKinds: ["crunchyroll"],
+    label: "Crunchyroll Video",
+    description:
+      "Download the highest quality stream available to yt-dlp with your account cookies.",
     outputKind: "video",
     pipeline: "yt_dlp",
     auth: "required",
@@ -85,10 +98,11 @@ export const presets: Preset[] = [
     id: "x-article-video-highest",
     siteKinds: ["x"],
     label: "X Article Video",
-    description: "Download the highest quality video from an X article.",
+    description:
+      "Resolve every video embedded in an X article and download the highest MP4 variant.",
     outputKind: "video",
-    pipeline: "yt_dlp",
-    auth: "recommended",
+    pipeline: "http_resolve_then_download",
+    auth: "required",
   },
   {
     id: "vimeo-video-highest",
@@ -120,6 +134,7 @@ export function detectSite(input: string): SiteKind {
     if (/\.(mp4|mov|m4v|webm|mkv)$/.test(path)) return "direct_file"
     if (host === "redd.it" || host.endsWith("reddit.com")) return "reddit"
     if (host.endsWith("linkedin.com")) return "linkedin"
+    if (host.endsWith("crunchyroll.com")) return "crunchyroll"
     if (host === "youtu.be" || host.endsWith("youtube.com")) return "youtube"
     if (host === "x.com" || host === "twitter.com") return "x"
     if (host.endsWith("vimeo.com")) return "vimeo"
@@ -134,18 +149,46 @@ export function detectSite(input: string): SiteKind {
 export function analyzeLocally(input: string): AnalyzeResult {
   const normalizedUrl = input.trim()
   const siteKind = detectSite(normalizedUrl)
-  const matching = presets.filter((preset) => preset.siteKinds.includes(siteKind))
-  const warnings =
-    siteKind === "linkedin"
-      ? ["LinkedIn usually needs browser cookies from the same local machine."]
-      : []
+  const matching = presets.filter((preset) =>
+    preset.siteKinds.includes(siteKind)
+  )
+  const warnings = warningsForSite(siteKind)
 
   return {
     normalizedUrl,
     siteKind,
-    presets: matching.length > 0 ? matching : presets.filter((preset) => preset.siteKinds.includes("generic")),
+    presets:
+      matching.length > 0
+        ? matching
+        : presets.filter((preset) => preset.siteKinds.includes("generic")),
     warnings,
   }
+}
+
+function warningsForSite(siteKind: SiteKind): string[] {
+  if (siteKind === "linkedin") {
+    return [
+      "LinkedIn usually needs browser cookies from the same local machine.",
+    ]
+  }
+  if (siteKind === "crunchyroll") {
+    return [
+      "Crunchyroll needs your own account cookies; DRM-protected streams are not bypassed.",
+    ]
+  }
+  if (siteKind === "reddit") {
+    return [
+      "Reddit may require logged-in cookies and yt-dlp browser impersonation support.",
+    ]
+  }
+  if (siteKind === "youtube") {
+    return [
+      "YouTube will try without cookies first, then retry with saved auth if needed.",
+    ]
+  }
+  if (siteKind === "x")
+    return ["X article/media extraction may require cookies."]
+  return []
 }
 
 export function createFallbackJob(input: StartDownloadRequest): Job {
@@ -163,7 +206,8 @@ export function createFallbackJob(input: StartDownloadRequest): Job {
     phase: "Tauri backend unavailable in browser preview",
     speed: null,
     eta: null,
-    errorMessage: "Run the desktop app with pnpm tauri dev to start real downloads.",
+    errorMessage:
+      "Run the desktop app with pnpm tauri dev to start real downloads.",
   }
 }
 

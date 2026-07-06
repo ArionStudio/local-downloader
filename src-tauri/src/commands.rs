@@ -267,7 +267,7 @@ impl AppState {
 pub async fn analyze_url(input: AnalyzeInput) -> CommandResult<AnalyzeResult> {
     let normalized_url = sites::normalize_url(&input.url)?;
     let site_kind = sites::detect_site(&normalized_url);
-    let matching_presets = presets::matching_presets(&site_kind);
+    let matching_presets = presets::matching_presets_for_url(&site_kind, &normalized_url);
     let warnings = sites::warnings_for_site(&site_kind);
 
     Ok(AnalyzeResult {
@@ -288,6 +288,12 @@ pub async fn start_download(
     let site = sites::detect_site(&normalized_url);
     let preset = presets::find_preset(&input.preset_id)
         .ok_or_else(|| format!("Unknown preset '{}'.", input.preset_id))?;
+    if site == crate::download::SiteKind::Reddit && !tools::has_available_impersonation_target(&app)
+    {
+        return Err(
+            "Reddit currently needs yt-dlp browser impersonation support, but no impersonation target is available. Install yt-dlp with curl_cffi support, then retry.".to_string(),
+        );
+    }
     let settings = settings_with_defaults(&app, &state)?;
     if input.output_dir.as_deref().unwrap_or_default().is_empty() {
         input.output_dir.clone_from(&settings.default_output_dir);

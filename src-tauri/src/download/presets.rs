@@ -1,4 +1,5 @@
 use super::{AuthRequirement, OutputKind, Pipeline, Preset, SiteKind};
+use url::Url;
 
 pub fn all_presets() -> Vec<Preset> {
     vec![
@@ -69,7 +70,16 @@ pub fn all_presets() -> Vec<Preset> {
             "linkedin-feed-update-video-highest",
             &[SiteKind::Linkedin],
             "LinkedIn Feed Update",
-            "Use local cookies for feed update activity URLs.",
+            "Use local cookies to resolve the DASH stream from feed update metadata.",
+            OutputKind::Video,
+            Pipeline::HttpResolveThenDownload,
+            AuthRequirement::Required,
+        ),
+        preset(
+            "crunchyroll-video-highest",
+            &[SiteKind::Crunchyroll],
+            "Crunchyroll Video",
+            "Download the highest quality stream available to yt-dlp with your account cookies.",
             OutputKind::Video,
             Pipeline::YtDlp,
             AuthRequirement::Required,
@@ -78,10 +88,10 @@ pub fn all_presets() -> Vec<Preset> {
             "x-article-video-highest",
             &[SiteKind::X],
             "X Article Video",
-            "Download the highest quality video from an X article.",
+            "Resolve every video embedded in an X article and download the highest MP4 variant.",
             OutputKind::Video,
-            Pipeline::YtDlp,
-            AuthRequirement::Recommended,
+            Pipeline::HttpResolveThenDownload,
+            AuthRequirement::Required,
         ),
         preset(
             "vimeo-video-highest",
@@ -125,8 +135,42 @@ pub fn matching_presets(site: &SiteKind) -> Vec<Preset> {
     matched
 }
 
+pub fn matching_presets_for_url(site: &SiteKind, input_url: &str) -> Vec<Preset> {
+    let mut matched = matching_presets(site);
+
+    if matches!(site, SiteKind::Linkedin) {
+        if let Ok(url) = Url::parse(input_url) {
+            let path = url.path().to_ascii_lowercase();
+            if path.starts_with("/feed/update/") {
+                promote_preset(&mut matched, "linkedin-feed-update-video-highest");
+            } else if path.starts_with("/pulse/") || path.contains("/article/") {
+                promote_preset(&mut matched, "linkedin-article-video-highest");
+            } else if path.starts_with("/posts/") {
+                promote_preset(&mut matched, "linkedin-post-video-highest");
+            }
+        }
+    }
+
+    if matches!(site, SiteKind::X) {
+        if let Ok(url) = Url::parse(input_url) {
+            if url.path().to_ascii_lowercase().contains("/article/") {
+                promote_preset(&mut matched, "x-article-video-highest");
+            }
+        }
+    }
+
+    matched
+}
+
 pub fn find_preset(id: &str) -> Option<Preset> {
     all_presets().into_iter().find(|preset| preset.id == id)
+}
+
+fn promote_preset(presets: &mut Vec<Preset>, preset_id: &str) {
+    if let Some(index) = presets.iter().position(|preset| preset.id == preset_id) {
+        let preset = presets.remove(index);
+        presets.insert(0, preset);
+    }
 }
 
 fn preset(
@@ -146,5 +190,19 @@ fn preset(
         output_kind,
         pipeline,
         auth,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_crunchyroll_preset() {
+        let presets = matching_presets(&SiteKind::Crunchyroll);
+
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].id, "crunchyroll-video-highest");
+        assert_eq!(presets[0].auth, AuthRequirement::Required);
     }
 }

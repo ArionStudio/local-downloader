@@ -10,6 +10,7 @@ pub enum SiteKind {
     Generic,
     Reddit,
     Linkedin,
+    Crunchyroll,
     Youtube,
     X,
     Vimeo,
@@ -24,6 +25,7 @@ impl SiteKind {
             SiteKind::Generic => "generic",
             SiteKind::Reddit => "reddit",
             SiteKind::Linkedin => "linkedin",
+            SiteKind::Crunchyroll => "crunchyroll",
             SiteKind::Youtube => "youtube",
             SiteKind::X => "x",
             SiteKind::Vimeo => "vimeo",
@@ -37,6 +39,7 @@ impl SiteKind {
         match value {
             "reddit" => SiteKind::Reddit,
             "linkedin" => SiteKind::Linkedin,
+            "crunchyroll" => SiteKind::Crunchyroll,
             "youtube" => SiteKind::Youtube,
             "x" => SiteKind::X,
             "vimeo" => SiteKind::Vimeo,
@@ -197,19 +200,18 @@ pub enum AuthSource {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FormatSelection {
+    #[default]
     Best,
-    Format { format_id: String },
+    Format {
+        format_id: String,
+    },
     AudioOnly,
-    VideoOnly { format_id: Option<String> },
-}
-
-impl Default for FormatSelection {
-    fn default() -> Self {
-        Self::Best
-    }
+    VideoOnly {
+        format_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

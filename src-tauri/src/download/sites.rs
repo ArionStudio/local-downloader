@@ -44,6 +44,10 @@ pub fn detect_site(input: &str) -> SiteKind {
         return SiteKind::Linkedin;
     }
 
+    if host.ends_with("crunchyroll.com") {
+        return SiteKind::Crunchyroll;
+    }
+
     if host == "youtu.be" || host.ends_with("youtube.com") {
         return SiteKind::Youtube;
     }
@@ -68,7 +72,19 @@ pub fn warnings_for_site(site: &SiteKind) -> Vec<String> {
         SiteKind::Linkedin => {
             vec!["LinkedIn usually needs browser cookies from the same local machine.".to_string()]
         }
+        SiteKind::Crunchyroll => {
+            vec![
+                "Crunchyroll needs your own account cookies; DRM-protected streams are not bypassed."
+                    .to_string(),
+            ]
+        }
         SiteKind::X => vec!["X article/media extraction may require cookies.".to_string()],
+        SiteKind::Reddit => {
+            vec![
+                "Reddit may require logged-in cookies and yt-dlp browser impersonation support."
+                    .to_string(),
+            ]
+        }
         SiteKind::Youtube => {
             vec![
                 "YouTube will try without cookies first, then retry with saved auth if needed."
@@ -76,5 +92,30 @@ pub fn warnings_for_site(site: &SiteKind) -> Vec<String> {
             ]
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_crunchyroll_urls() {
+        assert_eq!(
+            detect_site("https://www.crunchyroll.com/watch/G31UXDEJY/example"),
+            SiteKind::Crunchyroll
+        );
+        assert_eq!(
+            detect_site("https://www.crunchyroll.com/series/G4PH0WXVJ/spy-x-family"),
+            SiteKind::Crunchyroll
+        );
+    }
+
+    #[test]
+    fn keeps_direct_stream_detection_before_site_detection() {
+        assert_eq!(
+            detect_site("https://static.crunchyroll.com/example/master.m3u8"),
+            SiteKind::DirectHls
+        );
     }
 }

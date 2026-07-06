@@ -33,6 +33,25 @@ pub fn tool_version(app: &AppHandle, name: &str) -> Option<String> {
         .filter(|version| !version.is_empty())
 }
 
+pub fn has_available_impersonation_target(app: &AppHandle) -> bool {
+    let Some(tool) = find_tool(app, "yt-dlp") else {
+        return false;
+    };
+    let Ok(output) = Command::new(tool)
+        .arg("--list-impersonate-targets")
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| !line.contains("(unavailable)") && line.contains("curl_cffi"))
+}
+
 pub fn check_tool_updates(app: &AppHandle) -> Vec<ToolUpdate> {
     ["yt-dlp", "ffmpeg"]
         .iter()
