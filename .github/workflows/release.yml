@@ -17,7 +17,7 @@ jobs:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: "--target aarch64-apple-darwin --bundles dmg"
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
           - name: Ubuntu deb
             platform: ubuntu-22.04
             args: "--bundles deb"
