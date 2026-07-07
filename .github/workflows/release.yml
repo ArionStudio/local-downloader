@@ -17,12 +17,15 @@ jobs:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
+            assetPrefix: macos
             args: "--target aarch64-apple-darwin --bundles app,dmg"
           - name: Ubuntu deb
             platform: ubuntu-22.04
+            assetPrefix: ubuntu
             args: "--bundles deb"
           - name: Arch CachyOS AppImage
             platform: ubuntu-22.04
+            assetPrefix: arch
             args: "--bundles appimage"
 
     runs-on: ${{ matrix.platform }}
@@ -76,4 +79,5 @@ jobs:
           releaseBody: "Download the installer for your platform. The app updater uses latest.json from this release."
           releaseDraft: false
           prerelease: false
+          releaseAssetNamePattern: "${{ matrix.assetPrefix }}_[bundle]_[arch]_[name]_[version][ext]"
           args: ${{ matrix.args }}
