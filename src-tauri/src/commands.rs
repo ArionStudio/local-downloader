@@ -492,11 +492,14 @@ pub async fn check_tool_updates(app: AppHandle) -> CommandResult<Vec<tools::Tool
 }
 
 #[tauri::command]
-pub async fn install_tool_update(input: InstallToolUpdateInput) -> CommandResult<()> {
-    Err(format!(
-        "{} updates need a signed tools manifest in GitHub Releases.",
-        input.tool
-    ))
+pub async fn install_tool_update(
+    app: AppHandle,
+    input: InstallToolUpdateInput,
+) -> CommandResult<()> {
+    let tool = input.tool;
+    tauri::async_runtime::spawn_blocking(move || tools::install_tool_update(&app, &tool))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

@@ -100,7 +100,7 @@ type AppUpdateState = {
 }
 
 type ToolCheckState = {
-  status: "idle" | "checking" | "ready" | "issues" | "failed"
+  status: "idle" | "checking" | "installing" | "ready" | "issues" | "failed"
   tools: ToolUpdate[]
   checkedAt: string | null
   message: string
@@ -672,6 +672,12 @@ function App() {
   }
 
   async function handleInstallTool(tool: ToolUpdate["tool"]) {
+    setToolCheckState((current) => ({
+      ...current,
+      status: "installing",
+      message: `Installing ${tool} into app data tools.`,
+    }))
+    setError(null)
     try {
       await installToolUpdate(tool)
       await handleCheckTools()
@@ -1222,6 +1228,7 @@ function SettingsPage({
                 <ToolStatusItem
                   key={tool.tool}
                   tool={tool}
+                  installing={toolCheckState.status === "installing"}
                   onInstall={() => onInstallTool(tool.tool)}
                 />
               ))
@@ -1237,7 +1244,10 @@ function SettingsPage({
               Search order: app data tools, bundled resources, system PATH,
               `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
             </div>
-            <div>Installer: waiting for a signed tools manifest in releases.</div>
+            <div>
+              Installer: downloads verified upstream release assets into app data
+              tools.
+            </div>
             <div>Last check: {formatCheckedAt(toolCheckState.checkedAt)}</div>
           </div>
 
@@ -1246,10 +1256,13 @@ function SettingsPage({
               type="button"
               variant="outline"
               className="gap-1.5"
-              disabled={toolCheckState.status === "checking"}
+              disabled={
+                toolCheckState.status === "checking" ||
+                toolCheckState.status === "installing"
+              }
               onClick={onCheckTools}
             >
-              {toolCheckState.status === "checking" ? (
+              {["checking", "installing"].includes(toolCheckState.status) ? (
                 <Loader2 className="size-3.5 animate-spin" />
               ) : (
                 <RefreshCw className="size-3.5" />
@@ -1422,9 +1435,11 @@ function InfoRow({
 
 function ToolStatusItem({
   tool,
+  installing,
   onInstall,
 }: {
   tool: ToolUpdate
+  installing: boolean
   onInstall: () => void
 }) {
   const installed = tool.status === "installed"
@@ -1453,10 +1468,15 @@ function ToolStatusItem({
             size="xs"
             variant="outline"
             className="gap-1.5"
+            disabled={installing}
             onClick={onInstall}
           >
-            <Download className="size-3" />
-            Install
+            {installing ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Download className="size-3" />
+            )}
+            {installing ? "Installing" : "Install"}
           </Button>
         ) : null}
       </div>
@@ -2398,6 +2418,7 @@ function appUpdateStatusLabel(state: AppUpdateState): string {
 
 function toolStatusLabel(state: ToolCheckState): string {
   if (state.status === "checking") return "Checking"
+  if (state.status === "installing") return "Installing"
   if (state.status === "ready") return "Ready"
   if (state.status === "issues") return "Needs attention"
   if (state.status === "failed") return "Failed"
