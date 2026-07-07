@@ -128,7 +128,9 @@ for appdir in "${appdirs[@]}"; do
   mv "$patched" "$appimage"
 
   if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
-    pnpm tauri signer sign "$appimage" >"$appimage.sig"
+    rm -f "$appimage.sig"
+    pnpm tauri signer sign "$appimage"
+    test -s "$appimage.sig"
   else
     rm -f "$appimage.sig"
     echo "TAURI_SIGNING_PRIVATE_KEY is not set; skipped AppImage updater signature." >&2
