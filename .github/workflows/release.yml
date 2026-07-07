@@ -19,14 +19,17 @@ jobs:
             platform: macos-latest
             assetPrefix: macos
             args: "--target aarch64-apple-darwin --bundles app,dmg"
+            tauriScript: ""
           - name: Ubuntu deb
             platform: ubuntu-22.04
             assetPrefix: ubuntu
             args: "--bundles deb"
+            tauriScript: ""
           - name: Arch CachyOS AppImage
             platform: ubuntu-22.04
             assetPrefix: arch
             args: "--bundles appimage"
+            tauriScript: "./scripts/tauri-appimage-build.sh"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -80,4 +83,5 @@ jobs:
           releaseDraft: false
           prerelease: false
           releaseAssetNamePattern: "${{ matrix.assetPrefix }}_[bundle]_[arch]_[name]_[version][ext]"
+          tauriScript: ${{ matrix.tauriScript }}
           args: ${{ matrix.args }}
