@@ -150,10 +150,19 @@ export type AppUpdate = {
   notes: string
 }
 
+export type AppInfo = {
+  name: string
+  version: string
+  updaterEndpoint: string
+}
+
 export type ToolUpdate = {
   tool: "yt-dlp" | "ffmpeg"
+  status: "installed" | "missing"
   currentVersion?: string | null
-  availableVersion: string
+  availableVersion?: string | null
+  path?: string | null
+  message: string
 }
 
 export type Settings = {

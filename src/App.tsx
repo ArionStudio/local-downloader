@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { FormEvent } from "react"
+import type { FormEvent, ReactNode } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertCircle,
@@ -44,9 +44,11 @@ import {
   cancelJob,
   checkAppUpdate,
   checkToolUpdates,
+  getAppInfo,
   getJob,
   getSettings,
   installAppUpdate,
+  installToolUpdate,
   localFilePreviewUrl,
   listJobs,
   onDownloadJobEvent,
@@ -62,6 +64,8 @@ import { defaultSettings } from "@/lib/fallback"
 import type {
   AnalyzeResult,
   AdvancedDownloadOptions,
+  AppInfo,
+  AppUpdate,
   AuthRequirement,
   AuthSource,
   BrowserAuthSource,
@@ -75,10 +79,32 @@ import type {
   Settings as DownloaderSettings,
   SiteKind,
   StartDownloadRequest,
+  ToolUpdate,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-type AppTab = "download" | "runs" | "downloaded"
+type AppTab = "download" | "runs" | "downloaded" | "settings"
+
+type AppUpdateState = {
+  status:
+    | "idle"
+    | "checking"
+    | "current"
+    | "available"
+    | "installing"
+    | "restarting"
+    | "failed"
+  update: AppUpdate | null
+  checkedAt: string | null
+  message: string
+}
+
+type ToolCheckState = {
+  status: "idle" | "checking" | "ready" | "issues" | "failed"
+  tools: ToolUpdate[]
+  checkedAt: string | null
+  message: string
+}
 
 type DownloadAsset = {
   path: string
@@ -169,13 +195,23 @@ function App() {
   const [assetPathsByJob, setAssetPathsByJob] = useState<
     Record<string, string[]>
   >({})
-  const [showSettings, setShowSettings] = useState(false)
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const [jobs, setJobs] = useState<Job[]>([])
   const [jobLogs, setJobLogs] = useState<Record<string, JobLog[]>>({})
   const [sessionLogs, setSessionLogs] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
-  const [appUpdateLabel, setAppUpdateLabel] = useState("Up to date")
-  const [toolLabel, setToolLabel] = useState("Tools")
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({
+    status: "idle",
+    update: null,
+    checkedAt: null,
+    message: "Not checked in this session.",
+  })
+  const [toolCheckState, setToolCheckState] = useState<ToolCheckState>({
+    status: "idle",
+    tools: [],
+    checkedAt: null,
+    message: "Not checked in this session.",
+  })
   const analysesByUrlRef = useRef<Record<string, AnalyzeResult>>({})
   const analyzingUrlSet = useRef(new Set<string>())
 
@@ -188,6 +224,21 @@ function App() {
   const isAnalyzing = Object.values(analyzingUrls).some(Boolean)
 
   useEffect(() => {
+    getAppInfo()
+      .then((info) => setAppInfo(info))
+      .catch(() => undefined)
+
+    checkToolUpdates()
+      .then((tools) => setToolCheckState(toolCheckStateFromTools(tools)))
+      .catch((reason) =>
+        setToolCheckState({
+          status: "failed",
+          tools: [],
+          checkedAt: new Date().toISOString(),
+          message: reason instanceof Error ? reason.message : String(reason),
+        })
+      )
+
     getSettings()
       .then((loaded) => {
         setSettings(loaded)
@@ -421,7 +472,7 @@ function App() {
     const auth = authForPreset(preset, settings.auth)
     if (preset.auth === "required" && !isAuthConfigured(auth)) {
       setError("Configure browser cookies or cookies.txt in Settings first.")
-      setShowSettings(true)
+      setActiveTab("settings")
       return false
     }
 
@@ -524,7 +575,6 @@ function App() {
     const saved = await updateSettings(draftSettings)
     setSettings(saved)
     setDraftSettings(saved)
-    setShowSettings(false)
     pushSessionLog(`${new Date().toISOString()} INFO settings: saved`)
   }
 
@@ -539,27 +589,102 @@ function App() {
   }
 
   async function handleCheckAppUpdate() {
-    setAppUpdateLabel("Checking")
+    setAppUpdateState((current) => ({
+      ...current,
+      status: "checking",
+      message: "Checking GitHub release metadata.",
+    }))
     try {
       const update = await checkAppUpdate()
       if (!update) {
-        setAppUpdateLabel("Up to date")
+        setAppUpdateState({
+          status: "current",
+          update: null,
+          checkedAt: new Date().toISOString(),
+          message: "Installed version is current for the configured channel.",
+        })
         return
       }
 
-      setAppUpdateLabel(`Installing v${update.version}`)
-      await installAppUpdate()
-      setAppUpdateLabel("Restarting")
+      setAppUpdateState({
+        status: "available",
+        update,
+        checkedAt: new Date().toISOString(),
+        message: `Version ${update.version} is available.`,
+      })
     } catch (reason) {
-      setAppUpdateLabel("Update failed")
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setAppUpdateState({
+        status: "failed",
+        update: null,
+        checkedAt: new Date().toISOString(),
+        message,
+      })
+      setError(message)
+    }
+  }
+
+  async function handleInstallAppUpdate() {
+    setAppUpdateState((current) => ({
+      ...current,
+      status: "installing",
+      message: current.update
+        ? `Installing version ${current.update.version}.`
+        : "Checking and installing the latest available update.",
+    }))
+    try {
+      await installAppUpdate()
+      setAppUpdateState((current) => ({
+        ...current,
+        status: "restarting",
+        checkedAt: new Date().toISOString(),
+        message: "Update installed. Restarting the app.",
+      }))
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setAppUpdateState((current) => ({
+        ...current,
+        status: "failed",
+        checkedAt: new Date().toISOString(),
+        message,
+      }))
       setError(reason instanceof Error ? reason.message : String(reason))
     }
   }
 
   async function handleCheckTools() {
-    setToolLabel("Checking")
-    const updates = await checkToolUpdates()
-    setToolLabel(updates.length > 0 ? `${updates.length} update` : "Ready")
+    setToolCheckState((current) => ({
+      ...current,
+      status: "checking",
+      message: "Checking yt-dlp and ffmpeg on app data, bundled resources, and PATH.",
+    }))
+    try {
+      const tools = await checkToolUpdates()
+      setToolCheckState(toolCheckStateFromTools(tools))
+    } catch (reason) {
+      setToolCheckState({
+        status: "failed",
+        tools: [],
+        checkedAt: new Date().toISOString(),
+        message: reason instanceof Error ? reason.message : String(reason),
+      })
+    }
+  }
+
+  async function handleInstallTool(tool: ToolUpdate["tool"]) {
+    try {
+      await installToolUpdate(tool)
+      await handleCheckTools()
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setToolCheckState((current) => ({
+        ...current,
+        status: "failed",
+        checkedAt: new Date().toISOString(),
+        message,
+      }))
+      setError(message)
+    }
   }
 
   function handleUrlChange(nextUrl: string) {
@@ -614,57 +739,10 @@ function App() {
             </div>
             <span>Downloader</span>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 px-2.5 text-xs"
-              onClick={copyAllLogs}
-            >
-              <Clipboard className="size-3.5" />
-              Logs
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 px-2.5 text-xs"
-              onClick={handleCheckTools}
-            >
-              <Wrench className="size-3.5" />
-              {toolLabel}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 px-2.5 text-xs"
-              onClick={handleCheckAppUpdate}
-            >
-              <RefreshCw className="size-3.5" />
-              {appUpdateLabel}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 px-2.5 text-xs"
-              aria-label="Settings"
-              onClick={() => setShowSettings((current) => !current)}
-            >
-              <SettingsIcon className="size-4" />
-              Settings
-            </Button>
+          <div className="truncate text-xs text-muted-foreground">
+            {appInfo ? `v${appInfo.version}` : "Desktop downloader"}
           </div>
         </header>
-
-        <AnimatePresence initial={false}>
-          {showSettings ? (
-            <SettingsPanel
-              settings={draftSettings}
-              onChange={setDraftSettings}
-              onPickFolder={handlePickFolder}
-              onSave={handleSaveSettings}
-            />
-          ) : null}
-        </AnimatePresence>
 
         <section className="flex flex-1 flex-col justify-start pt-8">
           <form onSubmit={handleAnalyze} className="mx-auto w-full max-w-5xl">
@@ -726,9 +804,13 @@ function App() {
                     ? ` ${downloadedAssets.length}`
                     : ""}
                 </TabsTrigger>
+                <TabsTrigger value="settings">
+                  <SettingsIcon className="size-3.5" />
+                  Settings
+                </TabsTrigger>
               </TabsList>
 
-              {inputUrls.length > 1 ? (
+              {activeTab === "download" && inputUrls.length > 1 ? (
                 <Button
                   type="button"
                   size="sm"
@@ -934,6 +1016,25 @@ function App() {
                 <EmptyPanel message="Downloaded assets will appear here." />
               )}
             </TabsContent>
+
+            <TabsContent value="settings" className="mt-4">
+              <SettingsPage
+                appInfo={appInfo}
+                appUpdateState={appUpdateState}
+                toolCheckState={toolCheckState}
+                settings={draftSettings}
+                savedSettings={settings}
+                sessionLogs={sessionLogs}
+                onChange={setDraftSettings}
+                onPickFolder={handlePickFolder}
+                onSave={handleSaveSettings}
+                onCheckAppUpdate={handleCheckAppUpdate}
+                onInstallAppUpdate={handleInstallAppUpdate}
+                onCheckTools={handleCheckTools}
+                onInstallTool={handleInstallTool}
+                onCopyLogs={copyAllLogs}
+              />
+            </TabsContent>
           </Tabs>
         </section>
       </div>
@@ -941,24 +1042,49 @@ function App() {
   )
 }
 
-type SettingsPanelProps = {
+type SettingsPageProps = {
+  appInfo: AppInfo | null
+  appUpdateState: AppUpdateState
+  toolCheckState: ToolCheckState
   settings: DownloaderSettings
+  savedSettings: DownloaderSettings
+  sessionLogs: string[]
   onChange: (settings: DownloaderSettings) => void
   onPickFolder: () => void
   onSave: () => void
+  onCheckAppUpdate: () => void
+  onInstallAppUpdate: () => void
+  onCheckTools: () => void
+  onInstallTool: (tool: ToolUpdate["tool"]) => void
+  onCopyLogs: () => void
 }
 
-function SettingsPanel({
+function SettingsPage({
+  appInfo,
+  appUpdateState,
+  toolCheckState,
   settings,
+  savedSettings,
+  sessionLogs,
   onChange,
   onPickFolder,
   onSave,
-}: SettingsPanelProps) {
+  onCheckAppUpdate,
+  onInstallAppUpdate,
+  onCheckTools,
+  onInstallTool,
+  onCopyLogs,
+}: SettingsPageProps) {
   const authMode = settings.auth.kind
   const selectedBrowsers =
     settings.auth.kind === "browser" ? browserSources(settings.auth) : []
   const cookieFile =
     settings.auth.kind === "cookie_file" ? settings.auth.path : ""
+  const hasUnsavedSettings =
+    JSON.stringify(settings) !== JSON.stringify(savedSettings)
+  const missingTools = toolCheckState.tools.filter(
+    (tool) => tool.status === "missing"
+  )
 
   function setAuth(auth: AuthSource) {
     onChange({ ...settings, auth })
@@ -994,103 +1120,366 @@ function SettingsPanel({
   }
 
   return (
-    <motion.section
-      layout
-      initial={{ opacity: 0, y: -8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
-      className="mx-auto mt-5 w-full max-w-3xl rounded-lg border bg-card px-4 py-4"
-    >
-      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-        <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-          <div className="text-xs text-muted-foreground">Download folder</div>
-          <div className="mt-0.5 truncate">
-            {settings.defaultOutputDir ?? "Downloads"}
+    <div className="grid gap-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+        <section className="rounded-lg border bg-card p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <RefreshCw className="size-4" />
+                App update
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {appInfo?.name ?? "Downloader"}{" "}
+                {appInfo ? `v${appInfo.version}` : "version loading"}
+              </div>
+            </div>
+            <StatusBadge status={appUpdateState.status}>
+              {appUpdateStatusLabel(appUpdateState)}
+            </StatusBadge>
           </div>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="gap-2"
-          onClick={onPickFolder}
-        >
-          <FolderOpen className="size-4" />
-          Folder
-        </Button>
+
+          <div className="mt-4 grid gap-3">
+            <InfoRow
+              label="Current version"
+              value={appInfo ? `v${appInfo.version}` : "Loading"}
+            />
+            <InfoRow
+              label="Update feed"
+              value={appInfo?.updaterEndpoint ?? "Loading"}
+              mono
+            />
+            <InfoRow
+              label="Last check"
+              value={formatCheckedAt(appUpdateState.checkedAt)}
+            />
+            <InfoRow label="State" value={appUpdateState.message} />
+            {appUpdateState.update ? (
+              <>
+                <InfoRow
+                  label="Available version"
+                  value={`v${appUpdateState.update.version}`}
+                />
+                <InfoRow
+                  label="Release notes"
+                  value={appUpdateState.update.notes || "No release notes."}
+                />
+              </>
+            ) : null}
+          </div>
+
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              disabled={appUpdateState.status === "checking"}
+              onClick={onCheckAppUpdate}
+            >
+              {appUpdateState.status === "checking" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Check app
+            </Button>
+            <Button
+              type="button"
+              className="gap-1.5"
+              disabled={
+                appUpdateState.status !== "available" &&
+                appUpdateState.status !== "failed"
+              }
+              onClick={onInstallAppUpdate}
+            >
+              <Download className="size-3.5" />
+              Install app update
+            </Button>
+          </div>
+        </section>
+
+        <section className="rounded-lg border bg-card p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Wrench className="size-4" />
+                Tools
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {toolCheckState.tools.length > 0
+                  ? `${toolCheckState.tools.length - missingTools.length} ready, ${missingTools.length} missing`
+                  : "Status not loaded"}
+              </div>
+            </div>
+            <StatusBadge status={toolCheckState.status}>
+              {toolStatusLabel(toolCheckState)}
+            </StatusBadge>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            {toolCheckState.tools.length > 0 ? (
+              toolCheckState.tools.map((tool) => (
+                <ToolStatusItem
+                  key={tool.tool}
+                  tool={tool}
+                  onInstall={() => onInstallTool(tool.tool)}
+                />
+              ))
+            ) : (
+              <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                {toolCheckState.message}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
+            <div>
+              Search order: app data tools, bundled resources, system PATH,
+              `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
+            </div>
+            <div>Installer: waiting for a signed tools manifest in releases.</div>
+            <div>Last check: {formatCheckedAt(toolCheckState.checkedAt)}</div>
+          </div>
+
+          <div className="mt-4 flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              disabled={toolCheckState.status === "checking"}
+              onClick={onCheckTools}
+            >
+              {toolCheckState.status === "checking" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Refresh tools
+            </Button>
+          </div>
+        </section>
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Auth</Label>
-          <Select
-            value={authMode}
-            onValueChange={setAuthMode}
-            items={[
-              { value: "browser", label: "Browser cookies" },
-              { value: "cookie_file", label: "cookies.txt" },
-              { value: "none", label: "None" },
-            ]}
+      <section className="rounded-lg border bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <SettingsIcon className="size-4" />
+              Downloader settings
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {hasUnsavedSettings ? "Unsaved changes" : "Saved"}
+            </div>
+          </div>
+          <Button type="button" onClick={onSave} disabled={!hasUnsavedSettings}>
+            Save settings
+          </Button>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
+          <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
+            <div className="text-xs text-muted-foreground">Download folder</div>
+            <div className="mt-0.5 truncate">
+              {settings.defaultOutputDir ?? "Downloads"}
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-2"
+            onClick={onPickFolder}
           >
-            <SelectTrigger className="h-9 w-full bg-background">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="start">
-              <SelectItem value="browser">Browser cookies</SelectItem>
-              <SelectItem value="cookie_file">cookies.txt</SelectItem>
-              <SelectItem value="none">None</SelectItem>
-            </SelectContent>
-          </Select>
+            <FolderOpen className="size-4" />
+            Folder
+          </Button>
         </div>
 
-        <div className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
-          Browser fallback
-          <div className="grid grid-cols-2 gap-2 rounded-md border bg-background p-2 sm:grid-cols-4">
-            {browsers.map((browserName) => {
-              const checked = selectedBrowsers.some(
-                (source) => source.browser === browserName
-              )
-              return (
-                <label
-                  key={browserName}
-                  className={cn(
-                    "flex h-8 items-center gap-2 rounded border px-2 text-xs text-foreground capitalize",
-                    authMode !== "browser" && "opacity-50"
-                  )}
-                >
-                  <Checkbox
-                    checked={checked}
-                    disabled={authMode !== "browser"}
-                    onCheckedChange={(nextChecked) =>
-                      setBrowserEnabled(browserName, nextChecked)
-                    }
-                  />
-                  {browserName}
-                </label>
-              )
-            })}
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Auth</Label>
+            <Select
+              value={authMode}
+              onValueChange={setAuthMode}
+              items={[
+                { value: "browser", label: "Browser cookies" },
+                { value: "cookie_file", label: "cookies.txt" },
+                { value: "none", label: "None" },
+              ]}
+            >
+              <SelectTrigger className="h-9 w-full bg-background">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="start">
+                <SelectItem value="browser">Browser cookies</SelectItem>
+                <SelectItem value="cookie_file">cookies.txt</SelectItem>
+                <SelectItem value="none">None</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
+            Browser fallback
+            <div className="grid grid-cols-2 gap-2 rounded-md border bg-background p-2 sm:grid-cols-4">
+              {browsers.map((browserName) => {
+                const checked = selectedBrowsers.some(
+                  (source) => source.browser === browserName
+                )
+                return (
+                  <label
+                    key={browserName}
+                    className={cn(
+                      "flex h-8 items-center gap-2 rounded border px-2 text-xs text-foreground capitalize",
+                      authMode !== "browser" && "opacity-50"
+                    )}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={authMode !== "browser"}
+                      onCheckedChange={(nextChecked) =>
+                        setBrowserEnabled(browserName, Boolean(nextChecked))
+                      }
+                    />
+                    {browserName}
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+
+          <label className="space-y-1 text-xs text-muted-foreground sm:col-span-3">
+            Cookie file
+            <input
+              value={cookieFile}
+              disabled={authMode !== "cookie_file"}
+              onChange={(event) =>
+                setAuth({ kind: "cookie_file", path: event.target.value })
+              }
+              placeholder="/path/to/cookies.txt"
+              className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none disabled:opacity-50"
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="rounded-lg border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Clipboard className="size-4" />
+              Session log
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {sessionLogs.length} line{sessionLogs.length === 1 ? "" : "s"}
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            className="gap-1.5"
+            onClick={onCopyLogs}
+          >
+            <Clipboard className="size-3.5" />
+            Copy logs
+          </Button>
+        </div>
+        <div className="mt-3 max-h-56 overflow-auto rounded-md border bg-background p-3 font-mono text-xs">
+          {sessionLogs.length > 0 ? (
+            sessionLogs.slice(-80).map((line, index) => (
+              <div key={`${index}:${line}`} className="whitespace-pre-wrap">
+                {line}
+              </div>
+            ))
+          ) : (
+            <div className="text-muted-foreground">No logs yet.</div>
+          )}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function InfoRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="grid gap-1 rounded-md border bg-background px-3 py-2 text-sm sm:grid-cols-[132px_minmax(0,1fr)]">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div
+        className={cn("min-w-0 break-words", mono && "font-mono text-xs")}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+function ToolStatusItem({
+  tool,
+  onInstall,
+}: {
+  tool: ToolUpdate
+  onInstall: () => void
+}) {
+  const installed = tool.status === "installed"
+
+  return (
+    <div className="rounded-md border bg-background px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="font-mono text-sm font-medium">{tool.tool}</div>
+            <StatusBadge status={tool.status}>
+              {installed ? "Installed" : "Missing"}
+            </StatusBadge>
+          </div>
+          <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+            <div className="break-words">
+              Version: {tool.currentVersion ?? "Unavailable"}
+            </div>
+            <div className="break-words">Path: {tool.path ?? "Not found"}</div>
+            <div className="break-words">{tool.message}</div>
           </div>
         </div>
-
-        <label className="space-y-1 text-xs text-muted-foreground">
-          Cookie file
-          <input
-            value={cookieFile}
-            disabled={authMode !== "cookie_file"}
-            onChange={(event) =>
-              setAuth({ kind: "cookie_file", path: event.target.value })
-            }
-            placeholder="/path/to/cookies.txt"
-            className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none disabled:opacity-50"
-          />
-        </label>
+        {!installed ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="gap-1.5"
+            onClick={onInstall}
+          >
+            <Download className="size-3" />
+            Install
+          </Button>
+        ) : null}
       </div>
+    </div>
+  )
+}
 
-      <div className="mt-4 flex justify-end">
-        <Button type="button" onClick={onSave}>
-          Save
-        </Button>
-      </div>
-    </motion.section>
+function StatusBadge({
+  status,
+  children,
+}: {
+  status: string
+  children: ReactNode
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-6 shrink-0 items-center rounded-md border px-2 text-xs font-medium",
+        statusBadgeClass(status)
+      )}
+    >
+      {children}
+    </span>
   )
 }
 
@@ -1982,6 +2371,60 @@ function EmptyPanel({ message }: { message: string }) {
       {message}
     </div>
   )
+}
+
+function toolCheckStateFromTools(tools: ToolUpdate[]): ToolCheckState {
+  const missing = tools.filter((tool) => tool.status === "missing")
+  return {
+    status: missing.length > 0 ? "issues" : "ready",
+    tools,
+    checkedAt: new Date().toISOString(),
+    message:
+      missing.length > 0
+        ? `${missing.length} required tool${missing.length === 1 ? "" : "s"} missing.`
+        : "Required tools are available.",
+  }
+}
+
+function appUpdateStatusLabel(state: AppUpdateState): string {
+  if (state.status === "checking") return "Checking"
+  if (state.status === "current") return "Current"
+  if (state.status === "available") return "Available"
+  if (state.status === "installing") return "Installing"
+  if (state.status === "restarting") return "Restarting"
+  if (state.status === "failed") return "Failed"
+  return "Not checked"
+}
+
+function toolStatusLabel(state: ToolCheckState): string {
+  if (state.status === "checking") return "Checking"
+  if (state.status === "ready") return "Ready"
+  if (state.status === "issues") return "Needs attention"
+  if (state.status === "failed") return "Failed"
+  return "Not checked"
+}
+
+function statusBadgeClass(status: string): string {
+  if (["ready", "current", "installed"].includes(status)) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+  }
+  if (["available", "checking", "installing", "restarting"].includes(status)) {
+    return "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300"
+  }
+  if (["issues", "missing"].includes(status)) {
+    return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+  }
+  if (status === "failed") {
+    return "border-destructive/30 bg-destructive/10 text-destructive"
+  }
+  return "border-border bg-muted text-muted-foreground"
+}
+
+function formatCheckedAt(value: string | null): string {
+  if (!value) return "Not checked"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
 }
 
 function authForPreset(preset: Preset, auth: AuthSource): AuthSource {

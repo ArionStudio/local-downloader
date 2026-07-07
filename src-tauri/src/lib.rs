@@ -44,6 +44,7 @@ pub fn run() {
             commands::reveal_output_path,
             commands::create_video_thumbnail,
             commands::select_download_dir,
+            commands::get_app_info,
             commands::check_app_update,
             commands::install_app_update,
             commands::check_tool_updates,

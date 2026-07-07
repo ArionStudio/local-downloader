@@ -83,6 +83,14 @@ pub struct AppUpdate {
     notes: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    name: String,
+    version: String,
+    updater_endpoint: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -465,6 +473,17 @@ pub async fn install_app_update(app: AppHandle) -> CommandResult<()> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_app_info() -> AppInfo {
+    AppInfo {
+        name: "Downloader".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        updater_endpoint:
+            "https://github.com/ArionStudio/local-downloader/releases/latest/download/latest.json"
+                .to_string(),
+    }
 }
 
 #[tauri::command]

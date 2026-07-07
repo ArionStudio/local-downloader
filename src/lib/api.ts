@@ -12,6 +12,7 @@ import {
 } from "@/lib/fallback"
 import type {
   AnalyzeResult,
+  AppInfo,
   AppUpdate,
   AuthSource,
   DownloadJobEvent,
@@ -82,6 +83,18 @@ export async function createVideoThumbnail(path: string): Promise<string | null>
 export async function checkAppUpdate(): Promise<AppUpdate | null> {
   if (!isTauri()) return null
   return invoke("check_app_update")
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  if (!isTauri()) {
+    return {
+      name: "Downloader",
+      version: "0.1.1",
+      updaterEndpoint:
+        "https://github.com/ArionStudio/local-downloader/releases/latest/download/latest.json",
+    }
+  }
+  return invoke("get_app_info")
 }
 
 export async function installAppUpdate(): Promise<void> {
