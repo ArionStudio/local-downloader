@@ -1,0 +1,109 @@
+name: mac release diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to inspect"
+        required: true
+        default: "app-v0.1.6"
+      dmg_asset:
+        description: "DMG asset name"
+        required: true
+        default: "macos_dmg_aarch64_Downloader_0.1.6.dmg"
+      app_asset:
+        description: "App tarball asset name"
+        required: true
+        default: "macos_app_aarch64_Downloader_0.1.6.app.tar.gz"
+
+jobs:
+  diagnose:
+    name: Inspect macOS release assets
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          DMG_ASSET: ${{ inputs.dmg_asset }}
+          APP_ASSET: ${{ inputs.app_asset }}
+        run: |
+          set -euxo pipefail
+          mkdir -p artifacts
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$DMG_ASSET" --dir artifacts
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$APP_ASSET" --dir artifacts
+          ls -lah artifacts
+          file artifacts/*
+          shasum -a 256 artifacts/*
+
+      - name: Verify and inspect DMG
+        env:
+          DMG_ASSET: ${{ inputs.dmg_asset }}
+        run: |
+          set -uo pipefail
+          dmg="artifacts/$DMG_ASSET"
+          mount_dir="$(mktemp -d)"
+
+          run_check() {
+            echo "::group::$*"
+            set +e
+            "$@"
+            status=$?
+            set -e
+            echo "exit status: $status"
+            echo "::endgroup::"
+          }
+
+          run_check hdiutil verify "$dmg"
+          run_check hdiutil imageinfo "$dmg"
+
+          set -e
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir" || true' EXIT
+
+          find "$mount_dir" -maxdepth 3 -print
+          app="$(find "$mount_dir" -maxdepth 2 -name '*.app' -type d | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "No .app bundle found in DMG."
+            exit 1
+          fi
+
+          echo "App in DMG: $app"
+          run_check plutil -p "$app/Contents/Info.plist"
+          run_check codesign --verify --deep --strict --verbose=4 "$app"
+          run_check codesign -dv --verbose=4 "$app"
+          run_check spctl -a -vv --type execute "$app"
+          run_check xattr -lr "$app"
+
+      - name: Inspect updater app tarball
+        env:
+          APP_ASSET: ${{ inputs.app_asset }}
+        run: |
+          set -uo pipefail
+          mkdir -p app-tarball
+          tar -xzf "artifacts/$APP_ASSET" -C app-tarball
+          find app-tarball -maxdepth 3 -print
+          app="$(find app-tarball -maxdepth 3 -name '*.app' -type d | head -n 1)"
+          if [ -z "$app" ]; then
+            echo "No .app bundle found in app tarball."
+            exit 1
+          fi
+
+          run_check() {
+            echo "::group::$*"
+            set +e
+            "$@"
+            status=$?
+            set -e
+            echo "exit status: $status"
+            echo "::endgroup::"
+          }
+
+          echo "App in tarball: $app"
+          run_check plutil -p "$app/Contents/Info.plist"
+          run_check codesign --verify --deep --strict --verbose=4 "$app"
+          run_check codesign -dv --verbose=4 "$app"
+          run_check spctl -a -vv --type execute "$app"
+          run_check xattr -lr "$app"
