@@ -656,7 +656,8 @@ function App() {
     setToolCheckState((current) => ({
       ...current,
       status: "checking",
-      message: "Checking yt-dlp and ffmpeg on app data, bundled resources, and PATH.",
+      message:
+        "Checking yt-dlp and ffmpeg on app data, bundled resources, and PATH.",
     }))
     try {
       const tools = await checkToolUpdates()
@@ -1088,8 +1089,8 @@ function SettingsPage({
     settings.auth.kind === "cookie_file" ? settings.auth.path : ""
   const hasUnsavedSettings =
     JSON.stringify(settings) !== JSON.stringify(savedSettings)
-  const missingTools = toolCheckState.tools.filter(
-    (tool) => tool.status === "missing"
+  const issueTools = toolCheckState.tools.filter(
+    (tool) => tool.status !== "installed"
   )
 
   function setAuth(auth: AuthSource) {
@@ -1213,7 +1214,7 @@ function SettingsPage({
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
                 {toolCheckState.tools.length > 0
-                  ? `${toolCheckState.tools.length - missingTools.length} ready, ${missingTools.length} missing`
+                  ? `${toolCheckState.tools.length - issueTools.length} ready, ${issueTools.length} issue${issueTools.length === 1 ? "" : "s"}`
                   : "Status not loaded"}
               </div>
             </div>
@@ -1245,8 +1246,8 @@ function SettingsPage({
               `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
             </div>
             <div>
-              Installer: downloads verified upstream release assets into app data
-              tools.
+              Installer: downloads verified upstream release assets into app
+              data tools.
             </div>
             <div>Last check: {formatCheckedAt(toolCheckState.checkedAt)}</div>
           </div>
@@ -1443,6 +1444,7 @@ function ToolStatusItem({
   onInstall: () => void
 }) {
   const installed = tool.status === "installed"
+  const installable = !installed
 
   return (
     <div className="rounded-md border bg-background px-3 py-3">
@@ -1451,7 +1453,7 @@ function ToolStatusItem({
           <div className="flex flex-wrap items-center gap-2">
             <div className="font-mono text-sm font-medium">{tool.tool}</div>
             <StatusBadge status={tool.status}>
-              {installed ? "Installed" : "Missing"}
+              {toolStatusItemLabel(tool.status)}
             </StatusBadge>
           </div>
           <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
@@ -1462,7 +1464,7 @@ function ToolStatusItem({
             <div className="break-words">{tool.message}</div>
           </div>
         </div>
-        {!installed ? (
+        {installable ? (
           <Button
             type="button"
             size="xs"
@@ -2394,14 +2396,14 @@ function EmptyPanel({ message }: { message: string }) {
 }
 
 function toolCheckStateFromTools(tools: ToolUpdate[]): ToolCheckState {
-  const missing = tools.filter((tool) => tool.status === "missing")
+  const issues = tools.filter((tool) => tool.status !== "installed")
   return {
-    status: missing.length > 0 ? "issues" : "ready",
+    status: issues.length > 0 ? "issues" : "ready",
     tools,
     checkedAt: new Date().toISOString(),
     message:
-      missing.length > 0
-        ? `${missing.length} required tool${missing.length === 1 ? "" : "s"} missing.`
+      issues.length > 0
+        ? `${issues.length} required tool${issues.length === 1 ? "" : "s"} need attention.`
         : "Required tools are available.",
   }
 }
@@ -2425,6 +2427,12 @@ function toolStatusLabel(state: ToolCheckState): string {
   return "Not checked"
 }
 
+function toolStatusItemLabel(status: ToolUpdate["status"]): string {
+  if (status === "installed") return "Installed"
+  if (status === "unsupported") return "Unsupported"
+  return "Missing"
+}
+
 function statusBadgeClass(status: string): string {
   if (["ready", "current", "installed"].includes(status)) {
     return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
@@ -2432,7 +2440,7 @@ function statusBadgeClass(status: string): string {
   if (["available", "checking", "installing", "restarting"].includes(status)) {
     return "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-300"
   }
-  if (["issues", "missing"].includes(status)) {
+  if (["issues", "missing", "unsupported"].includes(status)) {
     return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
   }
   if (status === "failed") {

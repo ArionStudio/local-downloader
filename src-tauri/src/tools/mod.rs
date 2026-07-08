@@ -74,15 +74,23 @@ pub fn check_tool_updates(app: &AppHandle) -> Vec<ToolUpdate> {
                 .and_then(|tool_path| tool_version_from_path(tool, tool_path));
 
             if let Some(tool_path) = path {
-                let message = if *tool == "yt-dlp" && !has_available_impersonation_target(app) {
-                    "Installed, but Reddit/LinkedIn impersonation support is unavailable. Install yt-dlp with curl_cffi support if those sites fail.".to_string()
+                let unsupported_impersonation =
+                    *tool == "yt-dlp" && !has_available_impersonation_target_at(&tool_path);
+                let (status, message) = if unsupported_impersonation {
+                    (
+                        "unsupported",
+                        "Installed, but Reddit/LinkedIn impersonation support is unavailable. Install the app-managed yt-dlp so the PATH copy is not used.".to_string(),
+                    )
                 } else {
-                    "Installed and available to the downloader.".to_string()
+                    (
+                        "installed",
+                        "Installed and available to the downloader.".to_string(),
+                    )
                 };
 
                 ToolUpdate {
                     tool: tool.to_string(),
-                    status: "installed".to_string(),
+                    status: status.to_string(),
                     current_version: current,
                     available_version: None,
                     path: Some(tool_path.display().to_string()),

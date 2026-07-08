@@ -299,7 +299,7 @@ pub async fn start_download(
     if site == crate::download::SiteKind::Reddit && !tools::has_available_impersonation_target(&app)
     {
         return Err(
-            "Reddit currently needs yt-dlp browser impersonation support, but no impersonation target is available. Install yt-dlp with curl_cffi support, then retry.".to_string(),
+            "Reddit currently needs yt-dlp browser impersonation support, but no impersonation target is available. Install the app-managed yt-dlp from Settings > Tools, then retry.".to_string(),
         );
     }
     let settings = settings_with_defaults(&app, &state)?;

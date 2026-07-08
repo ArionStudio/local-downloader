@@ -1840,7 +1840,7 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
 
     if joined.contains("[reddit]") && joined.contains("no impersonate target is available") {
         return Some(
-            "Reddit blocked extraction because yt-dlp has no available browser impersonation target. Install curl_cffi support for yt-dlp, then retry.".to_string(),
+            "Reddit blocked extraction because yt-dlp has no available browser impersonation target. Install the app-managed yt-dlp from Settings > Tools, then retry.".to_string(),
         );
     }
 

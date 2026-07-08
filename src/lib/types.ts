@@ -158,7 +158,7 @@ export type AppInfo = {
 
 export type ToolUpdate = {
   tool: "yt-dlp" | "ffmpeg"
-  status: "installed" | "missing"
+  status: "installed" | "missing" | "unsupported"
   currentVersion?: string | null
   availableVersion?: string | null
   path?: string | null
