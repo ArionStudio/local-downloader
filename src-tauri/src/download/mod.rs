@@ -1,3 +1,4 @@
+mod chrome_cookies;
 pub mod engine;
 pub mod presets;
 pub mod sites;

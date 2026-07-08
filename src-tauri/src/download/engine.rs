@@ -1,4 +1,5 @@
 use super::{
+    chrome_cookies,
     AuthSource, BrowserAuthSource, FormatAnalysis, FormatOption, FormatSelection, JobLog,
     JobStatus, Pipeline, Preset, StartDownloadRequest,
 };
@@ -67,6 +68,7 @@ const X_GRAPHQL_FEATURES: &[&str] = &[
     "responsive_web_graphql_timeline_navigation_enabled",
 ];
 
+#[derive(Debug, Clone)]
 enum ProcessLine {
     Stdout(String),
     Stderr(String),
@@ -194,6 +196,7 @@ fn run_download_inner(
     let ffmpeg_location = ffmpeg.as_ref().map(|path| path.display().to_string());
     let attempts = auth_attempts(&input.auth, fallback_auth);
     let mut last_error = None;
+    let mut attempt_errors = Vec::<(String, String)>::new();
 
     if is_x_article_preset(&preset) && is_x_article_url(&input.url) {
         match run_x_article_video_attempts(
@@ -288,7 +291,25 @@ fn run_download_inner(
         )? {
             AttemptOutcome::Succeeded | AttemptOutcome::Canceled => return Ok(()),
             AttemptOutcome::Failed(error) => {
+                let error = match run_yt_dlp_with_chrome_cookie_export(
+                    &app,
+                    &state,
+                    &job_id,
+                    &input,
+                    &preset,
+                    ffmpeg_location.clone(),
+                    yt_dlp.as_path(),
+                    &cancel_flag,
+                    &attempt.auth,
+                    &error,
+                )? {
+                    Some(AttemptOutcome::Succeeded) => return Ok(()),
+                    Some(AttemptOutcome::Canceled) => return Ok(()),
+                    Some(AttemptOutcome::Failed(retry_error)) => retry_error,
+                    None => error,
+                };
                 last_error = Some(error.clone());
+                attempt_errors.push((attempt.label.clone(), error.clone()));
                 if let Some(next) = attempts.get(index + 1) {
                     log(
                         &app,
@@ -302,12 +323,16 @@ fn run_download_inner(
         }
     }
 
-    let error = state
+    let log_hint = state
         .logs_for_job(&job_id)
         .ok()
-        .and_then(|logs| failure_hint_from_logs(&logs))
-        .or(last_error)
-        .unwrap_or_else(|| "yt-dlp failed.".to_string());
+        .and_then(|logs| failure_hint_from_logs(&logs));
+    let auth_failure = browser_cookie_failure_summary(&attempt_errors);
+    let error = auth_failure.unwrap_or_else(|| match last_error {
+        Some(error) if !is_generic_yt_dlp_exit_error(&error) => error,
+        Some(error) => log_hint.unwrap_or(error),
+        None => log_hint.unwrap_or_else(|| "yt-dlp failed.".to_string()),
+    });
     mark_failed(&app, &state, &job_id, &error)?;
     Ok(())
 }
@@ -496,18 +521,46 @@ fn run_linkedin_feed_stream_attempts(
         let stream_url = match resolve_linkedin_feed_stream_url(yt_dlp, &input.url, &attempt.auth) {
             Ok(stream_url) => stream_url,
             Err(error) => {
-                last_error = Some(error.clone());
-                log(
-                    app,
-                    state,
-                    job_id,
-                    "warn",
-                    &format!(
-                        "Could not resolve LinkedIn feed stream with {}: {error}",
-                        attempt.label
-                    ),
-                )?;
-                continue;
+                if let Some(source) = targeted_chrome_cookie_source(&attempt.auth, &error) {
+                    log(
+                        app,
+                        state,
+                        job_id,
+                        "info",
+                        "Retrying LinkedIn feed stream with direct Chrome cookie export.",
+                    )?;
+                    match resolve_linkedin_feed_stream_url_with_chrome_export(
+                        yt_dlp, &input.url, &source,
+                    ) {
+                        Ok(stream_url) => stream_url,
+                        Err(retry_error) => {
+                            last_error = Some(retry_error.clone());
+                            log(
+                                app,
+                                state,
+                                job_id,
+                                "warn",
+                                &format!(
+                                    "Could not resolve LinkedIn feed stream with direct Chrome cookie export: {retry_error}"
+                                ),
+                            )?;
+                            continue;
+                        }
+                    }
+                } else {
+                    last_error = Some(error.clone());
+                    log(
+                        app,
+                        state,
+                        job_id,
+                        "warn",
+                        &format!(
+                            "Could not resolve LinkedIn feed stream with {}: {error}",
+                            attempt.label
+                        ),
+                    )?;
+                    continue;
+                }
             }
         };
 
@@ -559,6 +612,95 @@ fn run_linkedin_feed_stream_attempts(
     }
 }
 
+fn resolve_linkedin_feed_stream_url_with_chrome_export(
+    yt_dlp: &Path,
+    page_url: &str,
+    source: &BrowserAuthSource,
+) -> Result<String, String> {
+    let cookie_path = chrome_cookies::export(source, page_url)
+        .map_err(|error| format!("Could not export Chrome cookies directly: {error}"))?;
+    let auth = AuthSource::CookieFile {
+        path: cookie_path.display().to_string(),
+    };
+    let result = resolve_linkedin_feed_stream_url(yt_dlp, page_url, &auth).or_else(|error| {
+        resolve_linkedin_feed_stream_url_with_cookie_file_http(page_url, &cookie_path)
+            .map_err(|http_error| format!("{error}; direct HTTP fallback failed: {http_error}"))
+    });
+    let _ = fs::remove_file(&cookie_path);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_yt_dlp_with_chrome_cookie_export(
+    app: &AppHandle,
+    state: &commands::AppState,
+    job_id: &str,
+    input: &StartDownloadRequest,
+    preset: &Preset,
+    ffmpeg_location: Option<String>,
+    yt_dlp: &Path,
+    cancel_flag: &Arc<AtomicBool>,
+    auth: &AuthSource,
+    error: &str,
+) -> Result<Option<AttemptOutcome>, String> {
+    let Some(source) = targeted_chrome_cookie_source(auth, error) else {
+        return Ok(None);
+    };
+
+    log(
+        app,
+        state,
+        job_id,
+        "info",
+        "Retrying yt-dlp with direct Chrome cookie export.",
+    )?;
+
+    let cookie_path = match chrome_cookies::export(&source, &input.url) {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(Some(AttemptOutcome::Failed(format!(
+                "Could not export Chrome cookies directly: {error}"
+            ))));
+        }
+    };
+
+    let mut retry_input = input.clone();
+    retry_input.auth = AuthSource::CookieFile {
+        path: cookie_path.display().to_string(),
+    };
+    let outcome = run_yt_dlp_attempt(
+        app,
+        state,
+        job_id,
+        &retry_input,
+        preset,
+        ffmpeg_location,
+        yt_dlp,
+        cancel_flag,
+        "Retrying yt-dlp (direct Chrome cookie export)",
+    );
+    let _ = fs::remove_file(&cookie_path);
+    outcome.map(Some)
+}
+
+fn targeted_chrome_cookie_source(auth: &AuthSource, error: &str) -> Option<BrowserAuthSource> {
+    if !should_try_targeted_chrome_cookie_export(error) {
+        return None;
+    }
+
+    browser_sources(auth)
+        .into_iter()
+        .find(chrome_cookies::can_export)
+}
+
+fn should_try_targeted_chrome_cookie_export(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("item does not exist")
+        || lower.contains("desktop keyring")
+        || lower.contains("secretstorage")
+        || lower.contains("org.freedesktop.secrets")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_yt_dlp_attempt(
     app: &AppHandle,
@@ -573,6 +715,7 @@ fn run_yt_dlp_attempt(
 ) -> Result<AttemptOutcome, String> {
     let args = build_yt_dlp_args(input, preset, ffmpeg_location);
     update_phase(app, state, job_id, JobStatus::Downloading, 5.0, phase)?;
+    let mut attempt_logs = Vec::new();
 
     let mut command = Command::new(yt_dlp);
     command
@@ -616,7 +759,15 @@ fn run_yt_dlp_attempt(
             return Ok(AttemptOutcome::Canceled);
         }
 
-        drain_process_lines(app, state, job_id, &receiver, cancel_flag, 64)?;
+        drain_process_lines(
+            app,
+            state,
+            job_id,
+            &receiver,
+            cancel_flag,
+            Some(&mut attempt_logs),
+            64,
+        )?;
 
         if cancel_flag.load(Ordering::SeqCst) {
             process_control::force_kill_process_group(child.id());
@@ -631,6 +782,7 @@ fn run_yt_dlp_attempt(
             .map_err(|error| format!("Could not read yt-dlp status: {error}"))?
         {
             while let Ok(line) = receiver.try_recv() {
+                attempt_logs.push(sanitized_process_line_message(&line));
                 handle_process_line(app, state, job_id, line)?;
             }
 
@@ -650,9 +802,9 @@ fn run_yt_dlp_attempt(
                 return Ok(AttemptOutcome::Succeeded);
             }
 
-            return Ok(AttemptOutcome::Failed(format!(
-                "yt-dlp exited with status {status}"
-            )));
+            let error = yt_dlp_failure_hint_from_messages(&attempt_logs)
+                .unwrap_or_else(|| format!("yt-dlp exited with status {status}"));
+            return Ok(AttemptOutcome::Failed(error));
         }
 
         thread::sleep(Duration::from_millis(180));
@@ -665,6 +817,7 @@ fn drain_process_lines(
     job_id: &str,
     receiver: &Receiver<ProcessLine>,
     cancel_flag: &Arc<AtomicBool>,
+    mut captured: Option<&mut Vec<String>>,
     limit: usize,
 ) -> Result<(), String> {
     for _ in 0..limit {
@@ -673,7 +826,12 @@ fn drain_process_lines(
         }
 
         match receiver.try_recv() {
-            Ok(line) => handle_process_line(app, state, job_id, line)?,
+            Ok(line) => {
+                if let Some(captured) = captured.as_mut() {
+                    captured.push(sanitized_process_line_message(&line));
+                }
+                handle_process_line(app, state, job_id, line)?;
+            }
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
     }
@@ -1419,6 +1577,74 @@ fn resolve_linkedin_feed_stream_url(
     }
 }
 
+fn resolve_linkedin_feed_stream_url_with_cookie_file_http(
+    page_url: &str,
+    cookie_path: &Path,
+) -> Result<String, String> {
+    let cookie_header = linkedin_cookie_header_from_file(cookie_path)?;
+    let html = http_get_linkedin_text(page_url, &cookie_header)?;
+    choose_linkedin_stream_url(extract_linkedin_stream_urls(&html))
+        .ok_or_else(|| "LinkedIn authenticated page did not expose a DASH or HLS playlist URL.".to_string())
+}
+
+fn http_get_linkedin_text(url: &str, cookie_header: &str) -> Result<String, String> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", X_USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Cookie", cookie_header)
+        .call()
+        .map_err(|error| format!("HTTP request to LinkedIn failed: {error}"))?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| format!("Could not read LinkedIn HTTP response: {error}"))
+}
+
+fn linkedin_cookie_header_from_file(path: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read temporary Chrome cookie file: {error}"))?;
+    let cookies = text
+        .lines()
+        .filter_map(linkedin_cookie_from_netscape_line)
+        .collect::<Vec<_>>();
+
+    if cookies.is_empty() {
+        Err("Temporary Chrome cookie file did not contain LinkedIn cookies.".to_string())
+    } else {
+        Ok(cookies.join("; "))
+    }
+}
+
+fn linkedin_cookie_from_netscape_line(line: &str) -> Option<String> {
+    if line.trim().is_empty() || (line.starts_with('#') && !line.starts_with("#HttpOnly_")) {
+        return None;
+    }
+
+    let columns = line.split('\t').collect::<Vec<_>>();
+    if columns.len() < 7 {
+        return None;
+    }
+
+    let domain = columns[0].trim_start_matches("#HttpOnly_");
+    if !is_linkedin_cookie_domain(domain) {
+        return None;
+    }
+
+    let name = columns[5].trim();
+    let value = columns[6].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(format!("{name}={value}"))
+    }
+}
+
+fn is_linkedin_cookie_domain(domain: &str) -> bool {
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    domain == "linkedin.com" || domain.ends_with(".linkedin.com")
+}
+
 fn extract_linkedin_stream_url_from_dump(stdout: &[u8]) -> Option<String> {
     let output = String::from_utf8_lossy(stdout);
     let mut candidates = Vec::new();
@@ -1708,6 +1934,13 @@ fn human_size(bytes: i64) -> String {
     }
 }
 
+fn sanitized_process_line_message(line: &ProcessLine) -> String {
+    let raw = match line {
+        ProcessLine::Stdout(line) | ProcessLine::Stderr(line) => line,
+    };
+    redaction::sanitize_log_line(raw)
+}
+
 fn handle_process_line(
     app: &AppHandle,
     state: &commands::AppState,
@@ -1831,12 +2064,16 @@ fn log(
 }
 
 fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
-    let joined = logs
+    let messages = logs
         .iter()
         .map(|log| log.message.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_ascii_lowercase();
+        .collect::<Vec<_>>();
+
+    if let Some(hint) = yt_dlp_failure_hint_from_messages(&messages) {
+        return Some(hint);
+    }
+
+    let joined = messages.join("\n").to_ascii_lowercase();
 
     if joined.contains("[reddit]") && joined.contains("no impersonate target is available") {
         return Some(
@@ -1857,6 +2094,107 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
     }
 
     None
+}
+
+fn yt_dlp_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<String> {
+    browser_cookie_failure_hint_from_messages(messages)
+}
+
+fn is_generic_yt_dlp_exit_error(error: &str) -> bool {
+    error.starts_with("yt-dlp exited with status")
+}
+
+fn browser_cookie_failure_summary(errors: &[(String, String)]) -> Option<String> {
+    if errors.is_empty()
+        || errors
+            .iter()
+            .any(|(_, error)| !is_browser_cookie_failure_error(error))
+    {
+        return None;
+    }
+
+    let details = errors
+        .iter()
+        .map(|(label, error)| format!("{label}: {}", compact_browser_cookie_failure(error)))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Some(format!(
+        "Could not import cookies from any configured browser. {details}."
+    ))
+}
+
+fn is_browser_cookie_failure_error(error: &str) -> bool {
+    error.starts_with("Could not import browser cookies")
+        || error.starts_with("Could not decrypt browser cookies")
+}
+
+fn compact_browser_cookie_failure(error: &str) -> &'static str {
+    if error.contains("desktop keyring") {
+        "desktop keyring could not provide the cookie decryption key"
+    } else if error.contains("could not find that browser's cookie database") {
+        "cookie database not found"
+    } else if error.contains("Could not decrypt browser cookies") {
+        "cookies could not be decrypted"
+    } else {
+        "cookie import failed"
+    }
+}
+
+fn browser_cookie_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<String> {
+    let values = messages
+        .iter()
+        .map(|message| message.as_ref())
+        .collect::<Vec<_>>();
+    let joined = values.join("\n").to_ascii_lowercase();
+
+    let saw_cookie_import = joined.contains("extracting cookies from")
+        || joined.contains("cookies-from-browser")
+        || joined.contains("extract_cookies_from_browser");
+    if !saw_cookie_import {
+        return None;
+    }
+
+    let source = browser_cookie_source_from_messages(&values)
+        .unwrap_or_else(|| "the selected browser".to_string());
+
+    if joined.contains("could not find") && joined.contains("cookies database") {
+        return Some(format!(
+            "Could not import browser cookies from {source}: yt-dlp could not find that browser's cookie database. Select a browser/profile that exists on this machine or configure a cookies.txt file."
+        ));
+    }
+
+    if joined.contains("item does not exist")
+        || joined.contains("itemnotfoundexception")
+        || joined.contains("org.freedesktop.secrets")
+        || joined.contains("secretstorage")
+    {
+        return Some(format!(
+            "Could not import browser cookies from {source}. The browser cookie database was found, but the desktop keyring could not provide the cookie decryption key. Unlock or repair the OS keyring, select another browser/profile, or configure a cookies.txt file."
+        ));
+    }
+
+    if joined.contains("could not decrypt")
+        || joined.contains("cannot decrypt")
+        || joined.contains("keyring")
+    {
+        return Some(format!(
+            "Could not decrypt browser cookies from {source}. Unlock the OS keyring, select another browser/profile, or configure a cookies.txt file."
+        ));
+    }
+
+    None
+}
+
+fn browser_cookie_source_from_messages(messages: &[&str]) -> Option<String> {
+    let regex = Regex::new(r"(?i)extracting cookies from\s+([^\s:]+)").ok()?;
+    messages.iter().find_map(|message| {
+        regex
+            .captures(message)
+            .and_then(|captures| captures.get(1))
+            .map(|match_| match_.as_str().trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn mark_failed(
@@ -1903,6 +2241,85 @@ fn fail_job(app: &AppHandle, state: &commands::AppState, job_id: &str, error: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_chrome_keyring_cookie_import_failure() {
+        let messages = vec![
+            "[LinkedIn] 7166603687367327744: Downloading webpage".to_string(),
+            "Extracting cookies from chrome".to_string(),
+            "ERROR: Item does not exist!".to_string(),
+        ];
+
+        let hint = yt_dlp_failure_hint_from_messages(&messages).unwrap();
+
+        assert!(hint.contains("Could not import browser cookies from chrome"));
+        assert!(hint.contains("desktop keyring"));
+    }
+
+    #[test]
+    fn expands_multiple_browser_cookie_sources() {
+        let auth = AuthSource::Browser {
+            browser: "chrome".to_string(),
+            profile: None,
+            browsers: vec![
+                BrowserAuthSource {
+                    browser: "chrome".to_string(),
+                    profile: None,
+                },
+                BrowserAuthSource {
+                    browser: "firefox".to_string(),
+                    profile: Some("default-release".to_string()),
+                },
+            ],
+        };
+
+        let attempts = auth_attempts(&auth, None);
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].label, "chrome cookies");
+        assert_eq!(attempts[1].label, "firefox cookies (default-release)");
+    }
+
+    #[test]
+    fn summarizes_all_browser_cookie_failures() {
+        let errors = vec![
+            (
+                "chrome cookies".to_string(),
+                "Could not import browser cookies from chrome. The browser cookie database was found, but the desktop keyring could not provide the cookie decryption key. Unlock or repair the OS keyring, select another browser/profile, or configure a cookies.txt file.".to_string(),
+            ),
+            (
+                "chromium cookies".to_string(),
+                "Could not import browser cookies from chromium: yt-dlp could not find that browser's cookie database. Select a browser/profile that exists on this machine or configure a cookies.txt file.".to_string(),
+            ),
+            (
+                "firefox cookies".to_string(),
+                "Could not import browser cookies from firefox: yt-dlp could not find that browser's cookie database. Select a browser/profile that exists on this machine or configure a cookies.txt file.".to_string(),
+            ),
+        ];
+
+        let summary = browser_cookie_failure_summary(&errors).unwrap();
+
+        assert!(summary.contains("chrome cookies: desktop keyring"));
+        assert!(summary.contains("chromium cookies: cookie database not found"));
+        assert!(summary.contains("firefox cookies: cookie database not found"));
+    }
+
+    #[test]
+    fn parses_linkedin_netscape_cookie_lines() {
+        assert_eq!(
+            linkedin_cookie_from_netscape_line(
+                "#HttpOnly_.www.linkedin.com\tTRUE\t/\tTRUE\t1784131200\tli_at\tabc"
+            )
+            .as_deref(),
+            Some("li_at=abc")
+        );
+        assert_eq!(
+            linkedin_cookie_from_netscape_line(
+                ".example.com\tTRUE\t/\tTRUE\t1784131200\tli_at\tabc"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn extracts_linkedin_dash_url_from_entity_encoded_metadata() {
