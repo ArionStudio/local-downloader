@@ -28,7 +28,6 @@ serde = { version = "1.0", features = ["derive"] }
 base64 = "0.22.1"
 aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc"] }
-dbus = "0.9.12"
 log = "0.4"
 pbkdf2 = "0.12.2"
 tauri = { version = "2.11.3", features = ["protocol-asset"] }
@@ -45,6 +44,9 @@ tauri-plugin-dialog = "2.7.1"
 ureq = "3.2.1"
 sha2 = "0.10.9"
 tauri-plugin-clipboard-manager = "2.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9.12"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

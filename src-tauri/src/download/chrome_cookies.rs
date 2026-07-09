@@ -1,35 +1,49 @@
 use super::BrowserAuthSource;
+#[cfg(target_os = "linux")]
 use aes::Aes128;
+#[cfg(target_os = "linux")]
 use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+#[cfg(target_os = "linux")]
 use dbus::{
     arg::{RefArg, Variant},
     blocking::Connection as DbusConnection,
     Path as DbusPath,
 };
+#[cfg(target_os = "linux")]
 use pbkdf2::pbkdf2_hmac;
+#[cfg(target_os = "linux")]
 use rusqlite::{Connection, OpenFlags};
+#[cfg(target_os = "linux")]
 use sha1::Sha1;
+#[cfg(target_os = "linux")]
 use std::{
     collections::BTreeMap,
     env,
     fs::File,
     io::{BufWriter, Write},
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use std::path::PathBuf;
 use url::Url;
 
+#[cfg(target_os = "linux")]
 type Aes128CbcDec = cbc::Decryptor<Aes128>;
+#[cfg(target_os = "linux")]
 type SecretValue = (DbusPath<'static>, Vec<u8>, Vec<u8>, String);
 
+#[cfg(target_os = "linux")]
 const CHROME_SECRET_APPLICATION: &str = "chrome";
+#[cfg(target_os = "linux")]
 const CHROME_SECRET_SCHEMA: &str = "chrome_libsecret_os_crypt_password_v2";
+#[cfg(target_os = "linux")]
 const CHROME_COOKIE_EPOCH_OFFSET_SECONDS: i64 = 11_644_473_600;
 
 pub fn can_export(source: &BrowserAuthSource) -> bool {
     cfg!(target_os = "linux") && source.browser.trim().eq_ignore_ascii_case("chrome")
 }
 
+#[cfg(target_os = "linux")]
 pub fn export(source: &BrowserAuthSource, target_url: &str) -> Result<PathBuf, String> {
     if !can_export(source) {
         return Err("Targeted cookie export is only available for Chrome on Linux.".to_string());
@@ -60,6 +74,11 @@ pub fn export(source: &BrowserAuthSource, target_url: &str) -> Result<PathBuf, S
     Ok(output_path)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn export(_source: &BrowserAuthSource, _target_url: &str) -> Result<PathBuf, String> {
+    Err("Targeted cookie export is only available for Chrome on Linux.".to_string())
+}
+
 fn target_cookie_host(target_url: &str) -> Result<String, String> {
     Url::parse(target_url)
         .ok()
@@ -67,6 +86,7 @@ fn target_cookie_host(target_url: &str) -> Result<String, String> {
         .ok_or_else(|| "Target URL does not have a valid host.".to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn chrome_cookie_db_path(source: &BrowserAuthSource) -> Result<PathBuf, String> {
     let home = env::var_os("HOME").ok_or_else(|| "HOME is not set.".to_string())?;
     let profile = source
@@ -91,6 +111,7 @@ fn chrome_cookie_db_path(source: &BrowserAuthSource) -> Result<PathBuf, String> 
     }
 }
 
+#[cfg(target_os = "linux")]
 fn chrome_keyring_secret() -> Result<Vec<u8>, String> {
     let connection = DbusConnection::new_session()
         .map_err(|error| format!("Could not connect to Secret Service: {error}"))?;
@@ -140,6 +161,7 @@ fn chrome_keyring_secret() -> Result<Vec<u8>, String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn chrome_cookie_meta_version(cookie_db: &Path) -> Result<i64, String> {
     let connection = Connection::open_with_flags(cookie_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("Could not open Chrome cookie database: {error}"))?;
@@ -151,6 +173,7 @@ fn chrome_cookie_meta_version(cookie_db: &Path) -> Result<i64, String> {
         .map_err(|error| format!("Could not read Chrome cookie database version: {error}"))
 }
 
+#[cfg(target_os = "linux")]
 fn export_cookie_db(
     cookie_db: &Path,
     output_path: &Path,
@@ -214,6 +237,7 @@ fn export_cookie_db(
     }
 }
 
+#[cfg(target_os = "linux")]
 struct ChromeCookie {
     host: String,
     name: String,
@@ -225,6 +249,7 @@ struct ChromeCookie {
     http_only: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn cookie_value(
     cookie: &ChromeCookie,
     v10_key: &[u8; 16],
@@ -252,6 +277,7 @@ fn cookie_value(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn decrypt_cookie_value(ciphertext: &[u8], key: &[u8; 16], hash_prefix: bool) -> Option<Vec<u8>> {
     let mut plaintext = Aes128CbcDec::new(key.into(), (&[b' '; 16]).into())
         .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
@@ -265,6 +291,7 @@ fn decrypt_cookie_value(ciphertext: &[u8], key: &[u8; 16], hash_prefix: bool) ->
     Some(plaintext)
 }
 
+#[cfg(target_os = "linux")]
 fn write_netscape_cookie(
     writer: &mut BufWriter<File>,
     cookie: &ChromeCookie,
@@ -298,6 +325,7 @@ fn cookie_matches_target_host(cookie_host: &str, target_host: &str) -> bool {
     target_host == cookie_host || target_host.ends_with(&format!(".{cookie_host}"))
 }
 
+#[cfg(target_os = "linux")]
 fn chrome_time_to_unix(value: i64) -> Option<i64> {
     if value <= 0 {
         None
@@ -306,12 +334,14 @@ fn chrome_time_to_unix(value: i64) -> Option<i64> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn derive_linux_key(password: &[u8]) -> [u8; 16] {
     let mut key = [0u8; 16];
     pbkdf2_hmac::<Sha1>(password, b"saltysalt", 1, &mut key);
     key
 }
 
+#[cfg(target_os = "linux")]
 fn temp_suffix() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -325,6 +355,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn converts_chrome_cookie_timestamp_to_unix() {
         assert_eq!(chrome_time_to_unix(0), None);
         assert_eq!(chrome_time_to_unix(13_369_737_600_000_000), Some(1_725_264_000));
@@ -332,10 +363,13 @@ mod tests {
 
     #[test]
     fn detects_linux_chrome_source() {
-        assert!(can_export(&BrowserAuthSource {
-            browser: "chrome".to_string(),
-            profile: None,
-        }));
+        assert_eq!(
+            can_export(&BrowserAuthSource {
+                browser: "chrome".to_string(),
+                profile: None,
+            }),
+            cfg!(target_os = "linux")
+        );
         assert!(!can_export(&BrowserAuthSource {
             browser: "firefox".to_string(),
             profile: None,
