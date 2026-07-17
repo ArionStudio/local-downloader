@@ -69,6 +69,22 @@ APPRUN
   chmod 0755 "$appdir/AppRun"
 }
 
+patch_host_runtime() {
+  local appdir="$1"
+  local executable="$appdir/usr/bin/Downloader"
+
+  if [[ ! -x "$executable" ]]; then
+    echo "AppImage executable not found: $executable" >&2
+    exit 1
+  fi
+
+  patchelf --remove-rpath "$executable"
+  if [[ -n "$(patchelf --print-rpath "$executable")" ]]; then
+    echo "Failed to remove the AppImage executable RUNPATH." >&2
+    exit 1
+  fi
+}
+
 app_config_value() {
   local expression="$1"
   node -e "const config = require('./src-tauri/tauri.conf.json'); console.log($expression);"
@@ -122,6 +138,7 @@ for appdir in "${appdirs[@]}"; do
 
   echo "Patching AppImage launcher: $appimage"
   patch_apprun "$appdir"
+  patch_host_runtime "$appdir"
 
   rm -f "$patched"
   ARCH=x86_64 "$appimagetool" "$appdir" "$patched"
