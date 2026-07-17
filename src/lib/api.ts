@@ -22,6 +22,7 @@ import type {
   Settings,
   StartDownloadRequest,
   ToolUpdate,
+  YoutubeApiKeyInfo,
 } from "@/lib/types"
 
 const isTauri = () => "__TAURI_INTERNALS__" in window
@@ -121,6 +122,29 @@ export async function updateSettings(input: Partial<Settings>): Promise<Settings
   if (!isTauri()) return { ...defaultSettings, ...input }
   const current = await getSettings()
   return invoke("update_settings", { input: { ...current, ...input } })
+}
+
+export async function listYoutubeApiKeys(): Promise<YoutubeApiKeyInfo[]> {
+  if (!isTauri()) return []
+  return invoke("list_youtube_api_keys")
+}
+
+export async function addYoutubeApiKey(
+  apiKey: string
+): Promise<YoutubeApiKeyInfo[]> {
+  if (!isTauri()) {
+    throw new Error("Secure credential storage is available in the desktop app.")
+  }
+  return invoke("add_youtube_api_key", { input: { apiKey } })
+}
+
+export async function removeYoutubeApiKey(
+  id: string
+): Promise<YoutubeApiKeyInfo[]> {
+  if (!isTauri()) {
+    throw new Error("Secure credential storage is available in the desktop app.")
+  }
+  return invoke("remove_youtube_api_key", { input: { id } })
 }
 
 export async function readClipboardText(): Promise<string> {

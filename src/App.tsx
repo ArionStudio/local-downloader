@@ -11,6 +11,7 @@ import {
   Copy,
   Download,
   FolderOpen,
+  KeyRound,
   Film,
   Loader2,
   List,
@@ -23,6 +24,7 @@ import {
   Shield,
   SlidersHorizontal,
   Square,
+  Trash2,
   Wrench,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -40,6 +42,7 @@ import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   analyzeFormats,
+  addYoutubeApiKey,
   analyzeUrl,
   cancelJob,
   checkAppUpdate,
@@ -51,9 +54,11 @@ import {
   installToolUpdate,
   localFilePreviewUrl,
   listJobs,
+  listYoutubeApiKeys,
   onDownloadJobEvent,
   openOutputPath,
   readClipboardText,
+  removeYoutubeApiKey,
   revealOutputPath,
   selectDownloadDir,
   startDownload,
@@ -80,6 +85,7 @@ import type {
   SiteKind,
   StartDownloadRequest,
   ToolUpdate,
+  YoutubeApiKeyInfo,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -222,6 +228,24 @@ function App() {
   const inputUrls = useMemo(() => extractUrls(url), [url])
   const inputUrlsKey = inputUrls.join("\n")
   const isAnalyzing = Object.values(analyzingUrls).some(Boolean)
+  const channelCatalogueUrls = useMemo(
+    () =>
+      inputUrls.filter((inputUrl) => {
+        const analysis = analysesByUrl[inputUrl]
+        const presetId =
+          selectedPresetByUrl[inputUrl] ?? analysis?.presets[0]?.id
+        return presetId === "youtube-channel-catalogue"
+      }),
+    [analysesByUrl, inputUrls, selectedPresetByUrl]
+  )
+  const channelCatalogueLeadUrl = channelCatalogueUrls[0] ?? null
+  const resultUrls = useMemo(() => {
+    const groupedUrls = new Set(channelCatalogueUrls)
+    return inputUrls.filter(
+      (inputUrl) =>
+        !groupedUrls.has(inputUrl) || inputUrl === channelCatalogueLeadUrl
+    )
+  }, [channelCatalogueLeadUrl, channelCatalogueUrls, inputUrls])
 
   useEffect(() => {
     getAppInfo()
@@ -352,14 +376,18 @@ function App() {
   )
   const downloadNavItems = useMemo(
     () =>
-      inputUrls.map((inputUrl, index) => {
+      resultUrls.map((inputUrl, index) => {
         const analysis = analysesByUrl[inputUrl]
+        const isChannelCatalogueGroup = inputUrl === channelCatalogueLeadUrl
         return {
           id: downloadItemDomId(inputUrl),
           index: index + 1,
           sourceUrl: inputUrl,
           siteLabel: analysis ? siteLabels[analysis.siteKind] : "Link",
-          title: compactUrlLabel(inputUrl),
+          title:
+            isChannelCatalogueGroup && channelCatalogueUrls.length > 1
+              ? `${channelCatalogueUrls.length} channels`
+              : compactUrlLabel(inputUrl),
           status: analyzingUrls[inputUrl]
             ? "Inspecting"
             : analysis
@@ -367,7 +395,13 @@ function App() {
               : "Queued",
         }
       }),
-    [analysesByUrl, analyzingUrls, inputUrls]
+    [
+      analysesByUrl,
+      analyzingUrls,
+      channelCatalogueLeadUrl,
+      channelCatalogueUrls.length,
+      resultUrls,
+    ]
   )
 
   const runAnalysis = useCallback(
@@ -478,6 +512,20 @@ function App() {
 
     const request: StartDownloadRequest = {
       url: analysis.normalizedUrl,
+      channelUrls:
+        preset.id === "youtube-channel-catalogue"
+          ? inputUrls
+              .map((inputUrl) => analysesByUrl[inputUrl])
+              .filter((item): item is AnalyzeResult =>
+                Boolean(
+                  item?.presets.some(
+                    (candidate) =>
+                      candidate.id === "youtube-channel-catalogue"
+                  )
+                )
+              )
+              .map((item) => item.normalizedUrl)
+          : undefined,
       presetId: preset.id,
       outputDir: settings.defaultOutputDir,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
@@ -527,7 +575,18 @@ function App() {
         Boolean(item)
       )
 
-    for (const item of startable) {
+    const channelExports = startable.filter(
+      (item) => item.preset.id === "youtube-channel-catalogue"
+    )
+    if (channelExports.length > 0) {
+      const first = channelExports[0]
+      const started = await handleStart(first.sourceUrl, first.preset)
+      if (!started) return
+    }
+
+    for (const item of startable.filter(
+      (item) => item.preset.id !== "youtube-channel-catalogue"
+    )) {
       const started = await handleStart(item.sourceUrl, item.preset)
       if (!started) break
     }
@@ -699,12 +758,19 @@ function App() {
     if (extractUrls(nextUrl).length === 0) setError(null)
   }
 
-  function handlePresetChange(sourceUrl: string, presetId: string | null) {
+  function handlePresetChange(
+    sourceUrl: string,
+    presetId: string | null,
+    groupedSourceUrls: string[] = [sourceUrl]
+  ) {
     if (!presetId) return
-    setSelectedPresetByUrl((current) => ({
-      ...current,
-      [sourceUrl]: presetId,
-    }))
+    setSelectedPresetByUrl((current) => {
+      const next = { ...current }
+      groupedSourceUrls.forEach((url) => {
+        next[url] = presetId
+      })
+      return next
+    })
   }
 
   async function copyAllLogs() {
@@ -817,7 +883,7 @@ function App() {
                 </TabsTrigger>
               </TabsList>
 
-              {activeTab === "download" && inputUrls.length > 1 ? (
+              {activeTab === "download" && resultUrls.length > 1 ? (
                 <Button
                   type="button"
                   size="sm"
@@ -839,17 +905,21 @@ function App() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-3 text-sm">
                     <div className="text-muted-foreground">
-                      {inputUrls.length} link{inputUrls.length === 1 ? "" : "s"}
+                      {resultUrls.length} result
+                      {resultUrls.length === 1 ? "" : "s"}
+                      {inputUrls.length !== resultUrls.length
+                        ? ` · ${inputUrls.length} links`
+                        : ""}
                     </div>
                   </div>
                   <div
                     className={cn(
                       "grid gap-3",
-                      inputUrls.length > 1 &&
+                      resultUrls.length > 1 &&
                         "lg:grid-cols-[168px_minmax(0,1fr)]"
                     )}
                   >
-                    {inputUrls.length > 1 ? (
+                    {resultUrls.length > 1 ? (
                       <DownloadItemMenu
                         items={downloadNavItems}
                         onSelect={scrollToDownloadItem}
@@ -857,8 +927,10 @@ function App() {
                     ) : null}
 
                     <div className="space-y-3">
-                      {inputUrls.map((inputUrl) => {
+                      {resultUrls.map((inputUrl) => {
                         const analysis = analysesByUrl[inputUrl]
+                        const isChannelCatalogueGroup =
+                          inputUrl === channelCatalogueLeadUrl
                         const presetId =
                           selectedPresetByUrl[inputUrl] ??
                           analysis?.presets[0]?.id
@@ -881,20 +953,40 @@ function App() {
                           >
                             <DownloadLinkCard
                               sourceUrl={inputUrl}
+                              displayLabel={
+                                isChannelCatalogueGroup &&
+                                channelCatalogueUrls.length > 1
+                                  ? `${channelCatalogueUrls.length} YouTube channels`
+                                  : undefined
+                              }
                               analysis={analysis ?? null}
-                              analyzing={Boolean(analyzingUrls[inputUrl])}
+                              analyzing={
+                                Boolean(analyzingUrls[inputUrl]) ||
+                                (preset?.id === "youtube-channel-catalogue" &&
+                                  isAnalyzing)
+                              }
                               preset={preset}
                               selectedPresetId={presetId ?? null}
                               jobs={jobs}
                               outputDir={settings.defaultOutputDir}
-                              auth={settings.auth}
+                              auth={
+                                preset
+                                  ? authForPreset(preset, settings.auth)
+                                  : settings.auth
+                              }
                               advancedOptions={
                                 advancedByPreset[key] ?? defaultAdvancedOptions
                               }
                               formatInfo={formatsByPreset[key] ?? null}
                               loadingFormats={loadingFormatsKey === key}
                               onPresetChange={(nextPresetId) =>
-                                handlePresetChange(inputUrl, nextPresetId)
+                                handlePresetChange(
+                                  inputUrl,
+                                  nextPresetId,
+                                  isChannelCatalogueGroup
+                                    ? channelCatalogueUrls
+                                    : undefined
+                                )
                               }
                               onStart={() =>
                                 preset
@@ -1082,6 +1174,12 @@ function SettingsPage({
   onInstallTool,
   onCopyLogs,
 }: SettingsPageProps) {
+  const [youtubeApiKeys, setYoutubeApiKeys] = useState<YoutubeApiKeyInfo[]>([])
+  const [newYoutubeApiKey, setNewYoutubeApiKey] = useState("")
+  const [youtubeApiKeyBusy, setYoutubeApiKeyBusy] = useState(false)
+  const [youtubeApiKeyError, setYoutubeApiKeyError] = useState<string | null>(
+    null
+  )
   const authMode = settings.auth.kind
   const selectedBrowsers =
     settings.auth.kind === "browser" ? browserSources(settings.auth) : []
@@ -1092,6 +1190,46 @@ function SettingsPage({
   const issueTools = toolCheckState.tools.filter(
     (tool) => tool.status !== "installed"
   )
+
+  useEffect(() => {
+    listYoutubeApiKeys()
+      .then(setYoutubeApiKeys)
+      .catch((reason) =>
+        setYoutubeApiKeyError(
+          reason instanceof Error ? reason.message : String(reason)
+        )
+      )
+  }, [])
+
+  async function saveYoutubeApiKey() {
+    if (!newYoutubeApiKey.trim()) return
+    setYoutubeApiKeyBusy(true)
+    setYoutubeApiKeyError(null)
+    try {
+      setYoutubeApiKeys(await addYoutubeApiKey(newYoutubeApiKey))
+      setNewYoutubeApiKey("")
+    } catch (reason) {
+      setYoutubeApiKeyError(
+        reason instanceof Error ? reason.message : String(reason)
+      )
+    } finally {
+      setYoutubeApiKeyBusy(false)
+    }
+  }
+
+  async function deleteYoutubeApiKey(id: string) {
+    setYoutubeApiKeyBusy(true)
+    setYoutubeApiKeyError(null)
+    try {
+      setYoutubeApiKeys(await removeYoutubeApiKey(id))
+    } catch (reason) {
+      setYoutubeApiKeyError(
+        reason instanceof Error ? reason.message : String(reason)
+      )
+    } finally {
+      setYoutubeApiKeyBusy(false)
+    }
+  }
 
   function setAuth(auth: AuthSource) {
     onChange({ ...settings, auth })
@@ -1376,6 +1514,90 @@ function SettingsPage({
       </section>
 
       <section className="rounded-lg border bg-card p-4">
+        <div className="flex items-start gap-2">
+          <KeyRound className="mt-0.5 size-4" />
+          <div>
+            <div className="text-sm font-medium">YouTube Data API keys</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Encrypted by the OS credential vault. Multiple keys are rotated
+              across API batches and used as quota fallbacks.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <input
+            type="password"
+            value={newYoutubeApiKey}
+            disabled={youtubeApiKeyBusy}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="YouTube Data API key"
+            aria-label="YouTube Data API key"
+            className="h-9 min-w-0 rounded-md border bg-background px-3 text-sm text-foreground outline-none disabled:opacity-50"
+            onChange={(event) => setNewYoutubeApiKey(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault()
+                void saveYoutubeApiKey()
+              }
+            }}
+          />
+          <Button
+            type="button"
+            disabled={youtubeApiKeyBusy || !newYoutubeApiKey.trim()}
+            onClick={saveYoutubeApiKey}
+          >
+            {youtubeApiKeyBusy ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              "Add key"
+            )}
+          </Button>
+        </div>
+
+        {youtubeApiKeyError ? (
+          <div className="mt-2 text-xs text-destructive">
+            {youtubeApiKeyError}
+          </div>
+        ) : null}
+
+        <div className="mt-3 grid gap-2">
+          {youtubeApiKeys.length > 0 ? (
+            youtubeApiKeys.map((apiKey) => (
+              <div
+                key={apiKey.id}
+                className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm">{apiKey.label}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Stored securely · value hidden
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  disabled={youtubeApiKeyBusy}
+                  aria-label={`Remove ${apiKey.label}`}
+                  onClick={() => deleteYoutubeApiKey(apiKey.id)}
+                >
+                  <Trash2 className="size-3" />
+                  Remove
+                </Button>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+              No API keys saved. Channel exports will use the slower yt-dlp
+              metadata fallback.
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-lg border bg-card p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2 text-sm font-medium">
@@ -1553,6 +1775,7 @@ function DownloadItemMenu({
 
 type DownloadLinkCardProps = {
   sourceUrl: string
+  displayLabel?: string
   analysis: AnalyzeResult | null
   analyzing: boolean
   preset: Preset | null
@@ -1574,6 +1797,7 @@ type DownloadLinkCardProps = {
 
 function DownloadLinkCard({
   sourceUrl,
+  displayLabel,
   analysis,
   analyzing,
   preset,
@@ -1596,8 +1820,9 @@ function DownloadLinkCard({
     analysis && preset
       ? (jobs.find(
           (item) =>
-            item.sourceUrl === analysis.normalizedUrl &&
-            item.presetId === preset.id
+            item.presetId === preset.id &&
+            (preset.id === "youtube-channel-catalogue" ||
+              item.sourceUrl === analysis.normalizedUrl)
         ) ?? null)
       : null
   const running =
@@ -1616,7 +1841,7 @@ function DownloadLinkCard({
               </span>
             ) : null}
             <span className="rounded border bg-muted px-1.5 py-0.5 text-[11px] tracking-normal text-muted-foreground uppercase">
-              video
+              {preset?.outputKind ?? "video"}
             </span>
             <span className="rounded border bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
               {authLabels[presetAuth]}
@@ -1628,7 +1853,9 @@ function DownloadLinkCard({
               </span>
             ) : null}
           </div>
-          <div className="truncate text-sm font-medium">{sourceUrl}</div>
+          <div className="truncate text-sm font-medium">
+            {displayLabel ?? sourceUrl}
+          </div>
           {analysis?.warnings.length ? (
             <div className="flex items-center gap-1.5 text-xs text-amber-700">
               <Shield className="size-3.5" />
@@ -1683,7 +1910,9 @@ function DownloadLinkCard({
                 <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
                   <div className="text-xs text-muted-foreground">Output</div>
                   <div className="mt-0.5 truncate">
-                    {outputDir ?? "Downloads"}
+                    {preset.pipeline === "youtube_channel_export"
+                      ? `${outputDir ?? "Downloads"}/youtube_export`
+                      : (outputDir ?? "Downloads")}
                   </div>
                 </div>
                 <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
@@ -1697,13 +1926,15 @@ function DownloadLinkCard({
                 </div>
               </div>
 
-              <AdvancedDownloadPanel
-                options={advancedOptions}
-                formatInfo={formatInfo}
-                loadingFormats={loadingFormats}
-                onChange={onAdvancedChange}
-                onLoadFormats={onLoadFormats}
-              />
+              {preset.pipeline !== "youtube_channel_export" ? (
+                <AdvancedDownloadPanel
+                  options={advancedOptions}
+                  formatInfo={formatInfo}
+                  loadingFormats={loadingFormats}
+                  onChange={onAdvancedChange}
+                  onLoadFormats={onLoadFormats}
+                />
+              ) : null}
 
               <div className="flex justify-end">
                 <Button
@@ -1713,7 +1944,9 @@ function DownloadLinkCard({
                   onClick={onStart}
                 >
                   <Download className="size-4" />
-                  Start
+                  {preset.pipeline === "youtube_channel_export"
+                    ? "Export all channels"
+                    : "Start"}
                 </Button>
               </div>
             </>
@@ -2517,7 +2750,14 @@ function stableHash(value: string): string {
 function compactUrlLabel(input: string): string {
   try {
     const parsed = new URL(input)
-    const leaf = parsed.pathname.split("/").filter(Boolean).at(-1)
+    const parts = parsed.pathname.split("/").filter(Boolean)
+    const leaf =
+      parsed.hostname.endsWith("youtube.com") &&
+      ["videos", "shorts", "streams", "playlists", "about"].includes(
+        parts.at(-1)?.toLowerCase() ?? ""
+      )
+        ? parts.at(-2)
+        : parts.at(-1)
     return leaf ? `${parsed.hostname}/${leaf}` : parsed.hostname
   } catch {
     return input

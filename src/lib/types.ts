@@ -10,9 +10,13 @@ export type SiteKind =
   | "direct_hls"
   | "direct_file"
 
-export type OutputKind = "video"
+export type OutputKind = "video" | "data"
 
-export type Pipeline = "yt_dlp" | "ffmpeg_hls" | "http_resolve_then_download"
+export type Pipeline =
+  | "yt_dlp"
+  | "ffmpeg_hls"
+  | "http_resolve_then_download"
+  | "youtube_channel_export"
 
 export type AuthRequirement = "none" | "optional" | "recommended" | "required"
 
@@ -100,6 +104,7 @@ export type JobLog = {
 
 export type StartDownloadRequest = {
   url: string
+  channelUrls?: string[]
   presetId: string
   outputDir?: string | null
   filenameTemplate?: string | null
@@ -163,6 +168,11 @@ export type ToolUpdate = {
   availableVersion?: string | null
   path?: string | null
   message: string
+}
+
+export type YoutubeApiKeyInfo = {
+  id: string
+  label: string
 }
 
 export type Settings = {

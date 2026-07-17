@@ -4,6 +4,7 @@ mod process_control;
 mod redaction;
 mod storage;
 mod tools;
+mod youtube_api_keys;
 
 use tauri::{Manager, WindowEvent};
 
@@ -51,6 +52,9 @@ pub fn run() {
             commands::install_tool_update,
             commands::get_settings,
             commands::update_settings,
+            commands::list_youtube_api_keys,
+            commands::add_youtube_api_key,
+            commands::remove_youtube_api_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

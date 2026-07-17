@@ -2,6 +2,7 @@ mod chrome_cookies;
 pub mod engine;
 pub mod presets;
 pub mod sites;
+mod youtube_export;
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +57,7 @@ impl SiteKind {
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
     Video,
+    Data,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +66,7 @@ pub enum Pipeline {
     YtDlp,
     FfmpegHls,
     HttpResolveThenDownload,
+    YoutubeChannelExport,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -235,6 +238,8 @@ pub struct AdvancedDownloadOptions {
 #[serde(rename_all = "camelCase")]
 pub struct StartDownloadRequest {
     pub url: String,
+    #[serde(default)]
+    pub channel_urls: Vec<String>,
     pub preset_id: String,
     pub output_dir: Option<String>,
     pub filename_template: Option<String>,

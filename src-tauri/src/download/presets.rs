@@ -1,4 +1,5 @@
 use super::{AuthRequirement, OutputKind, Pipeline, Preset, SiteKind};
+use crate::download::sites;
 use url::Url;
 
 pub fn all_presets() -> Vec<Preset> {
@@ -47,6 +48,15 @@ pub fn all_presets() -> Vec<Preset> {
             OutputKind::Video,
             Pipeline::YtDlp,
             AuthRequirement::Recommended,
+        ),
+        preset(
+            "youtube-channel-catalogue",
+            &[SiteKind::Youtube],
+            "YouTube Channel Catalogue",
+            "Export public channel video metadata to youtube_videos.json and youtube_videos.xlsx.",
+            OutputKind::Data,
+            Pipeline::YoutubeChannelExport,
+            AuthRequirement::None,
         ),
         preset(
             "linkedin-post-video-highest",
@@ -138,6 +148,14 @@ pub fn matching_presets(site: &SiteKind) -> Vec<Preset> {
 pub fn matching_presets_for_url(site: &SiteKind, input_url: &str) -> Vec<Preset> {
     let mut matched = matching_presets(site);
 
+    if matches!(site, SiteKind::Youtube) {
+        if sites::youtube_channel_videos_url(input_url).is_ok() {
+            promote_preset(&mut matched, "youtube-channel-catalogue");
+        } else {
+            matched.retain(|preset| preset.id != "youtube-channel-catalogue");
+        }
+    }
+
     if matches!(site, SiteKind::Linkedin) {
         if let Ok(url) = Url::parse(input_url) {
             let path = url.path().to_ascii_lowercase();
@@ -204,5 +222,20 @@ mod tests {
         assert_eq!(presets.len(), 1);
         assert_eq!(presets[0].id, "crunchyroll-video-highest");
         assert_eq!(presets[0].auth, AuthRequirement::Required);
+    }
+
+    #[test]
+    fn promotes_catalogue_only_for_youtube_channel_links() {
+        let channel = matching_presets_for_url(
+            &SiteKind::Youtube,
+            "https://www.youtube.com/@anthropic-ai/videos",
+        );
+        let video =
+            matching_presets_for_url(&SiteKind::Youtube, "https://www.youtube.com/watch?v=abc");
+
+        assert_eq!(channel[0].id, "youtube-channel-catalogue");
+        assert!(video
+            .iter()
+            .all(|preset| preset.id != "youtube-channel-catalogue"));
     }
 }

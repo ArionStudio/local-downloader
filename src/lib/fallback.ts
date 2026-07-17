@@ -57,6 +57,16 @@ export const presets: Preset[] = [
     auth: "recommended",
   },
   {
+    id: "youtube-channel-catalogue",
+    siteKinds: ["youtube"],
+    label: "YouTube Channel Catalogue",
+    description:
+      "Export public channel video metadata to youtube_videos.json and youtube_videos.xlsx.",
+    outputKind: "data",
+    pipeline: "youtube_channel_export",
+    auth: "none",
+  },
+  {
     id: "linkedin-post-video-highest",
     siteKinds: ["linkedin"],
     label: "LinkedIn Post Video",
@@ -149,10 +159,27 @@ export function detectSite(input: string): SiteKind {
 export function analyzeLocally(input: string): AnalyzeResult {
   const normalizedUrl = input.trim()
   const siteKind = detectSite(normalizedUrl)
-  const matching = presets.filter((preset) =>
+  let matching = presets.filter((preset) =>
     preset.siteKinds.includes(siteKind)
   )
-  const warnings = warningsForSite(siteKind)
+  if (siteKind === "youtube") {
+    if (looksLikeYouTubeChannelUrl(normalizedUrl)) {
+      matching = [
+        ...matching.filter((preset) => preset.id === "youtube-channel-catalogue"),
+        ...matching.filter((preset) => preset.id !== "youtube-channel-catalogue"),
+      ]
+    } else {
+      matching = matching.filter(
+        (preset) => preset.id !== "youtube-channel-catalogue"
+      )
+    }
+  }
+  const warnings =
+    matching[0]?.id === "youtube-channel-catalogue"
+      ? [
+          "The catalogue includes the channel's standard Videos tab, not Shorts or livestream tabs.",
+        ]
+      : warningsForSite(siteKind)
 
   return {
     normalizedUrl,
@@ -162,6 +189,22 @@ export function analyzeLocally(input: string): AnalyzeResult {
         ? matching
         : presets.filter((preset) => preset.siteKinds.includes("generic")),
     warnings,
+  }
+}
+
+function looksLikeYouTubeChannelUrl(input: string): boolean {
+  try {
+    const url = new URL(input)
+    const host = url.hostname.replace(/^(www\.|m\.)/, "").toLowerCase()
+    const parts = url.pathname.split("/").filter(Boolean)
+    return (
+      host === "youtube.com" &&
+      ((parts[0]?.startsWith("@") && parts[0].length > 1) ||
+        (["channel", "c", "user"].includes(parts[0] ?? "") &&
+          Boolean(parts[1])))
+    )
+  } catch {
+    return false
   }
 }
 

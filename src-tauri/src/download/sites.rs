@@ -11,6 +11,49 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     }
 }
 
+pub fn youtube_channel_videos_url(input: &str) -> Result<String, String> {
+    let mut url = Url::parse(input.trim()).map_err(|_| "Enter a valid URL.".to_string())?;
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.")
+        .trim_start_matches("m.")
+        .to_ascii_lowercase();
+    if host != "youtube.com" {
+        return Err("Enter a YouTube channel link.".to_string());
+    }
+
+    let segments = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let identity_len = match segments.as_slice() {
+        [handle, ..] if handle.starts_with('@') && handle.len() > 1 => 1,
+        [kind, value, ..] if matches!(*kind, "channel" | "c" | "user") && !value.is_empty() => 2,
+        _ => {
+            return Err(
+                "Enter a YouTube channel handle, /channel/, /c/, or /user/ link.".to_string(),
+            )
+        }
+    };
+
+    let mut path = segments[..identity_len].join("/");
+    path.insert(0, '/');
+    path.push_str("/videos");
+    url.set_scheme("https")
+        .map_err(|_| "Invalid YouTube URL.".to_string())?;
+    url.set_host(Some("www.youtube.com"))
+        .map_err(|_| "Invalid YouTube URL.".to_string())?;
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
 pub fn detect_site(input: &str) -> SiteKind {
     let Ok(url) = Url::parse(input) else {
         return SiteKind::Generic;
@@ -117,5 +160,42 @@ mod tests {
             detect_site("https://static.crunchyroll.com/example/master.m3u8"),
             SiteKind::DirectHls
         );
+    }
+
+    #[test]
+    fn normalizes_supported_youtube_channel_links_to_videos_tab() {
+        let cases = [
+            (
+                "https://youtube.com/@anthropic-ai",
+                "https://www.youtube.com/@anthropic-ai/videos",
+            ),
+            (
+                "https://m.youtube.com/@anthropic-ai/shorts?view=0",
+                "https://www.youtube.com/@anthropic-ai/videos",
+            ),
+            (
+                "https://youtube.com/channel/UC123/videos",
+                "https://www.youtube.com/channel/UC123/videos",
+            ),
+            (
+                "https://www.youtube.com/c/HuggingFace/playlists",
+                "https://www.youtube.com/c/HuggingFace/videos",
+            ),
+            (
+                "https://youtube.com/user/example/about",
+                "https://www.youtube.com/user/example/videos",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(youtube_channel_videos_url(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_youtube_video_and_playlist_links_as_channels() {
+        assert!(youtube_channel_videos_url("https://youtube.com/watch?v=abc").is_err());
+        assert!(youtube_channel_videos_url("https://youtube.com/playlist?list=abc").is_err());
+        assert!(youtube_channel_videos_url("https://youtu.be/abc").is_err());
     }
 }

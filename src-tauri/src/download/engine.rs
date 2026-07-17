@@ -181,6 +181,9 @@ fn run_download_inner(
     let yt_dlp = tools::find_tool(&app, "yt-dlp").ok_or_else(|| {
         "yt-dlp was not found. Bundle it in src-tauri/binaries or install it locally.".to_string()
     })?;
+    if matches!(&preset.pipeline, Pipeline::YoutubeChannelExport) {
+        return super::youtube_export::run(&app, &state, &job_id, &input, &cancel_flag);
+    }
     let ffmpeg = tools::find_tool(&app, "ffmpeg");
 
     if matches!(&preset.pipeline, Pipeline::HttpResolveThenDownload) {

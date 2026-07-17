@@ -5,12 +5,12 @@ use crate::{
     },
     process_control,
     storage::Storage,
-    tools,
+    tools, youtube_api_keys,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     process::Command,
     sync::{
@@ -60,6 +60,25 @@ pub struct InstallToolUpdateInput {
 #[serde(rename_all = "camelCase")]
 pub struct PathInput {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddYoutubeApiKeyInput {
+    api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveYoutubeApiKeyInput {
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YoutubeApiKeyInfo {
+    id: String,
+    label: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +226,18 @@ impl AppState {
         self.storage.set_json("settings", &value)
     }
 
+    pub fn youtube_api_key_ids(&self) -> CommandResult<Vec<String>> {
+        self.storage.get_json("youtube_api_key_ids")?.map_or_else(
+            || Ok(Vec::new()),
+            |value| serde_json::from_value(value).map_err(|error| error.to_string()),
+        )
+    }
+
+    pub fn set_youtube_api_key_ids(&self, ids: &[String]) -> CommandResult<()> {
+        let value = serde_json::to_value(ids).map_err(|error| error.to_string())?;
+        self.storage.set_json("youtube_api_key_ids", &value)
+    }
+
     pub fn add_cancel_flag(&self, job_id: &str) -> CommandResult<Arc<AtomicBool>> {
         let flag = Arc::new(AtomicBool::new(false));
         self.cancels
@@ -276,7 +307,14 @@ pub async fn analyze_url(input: AnalyzeInput) -> CommandResult<AnalyzeResult> {
     let normalized_url = sites::normalize_url(&input.url)?;
     let site_kind = sites::detect_site(&normalized_url);
     let matching_presets = presets::matching_presets_for_url(&site_kind, &normalized_url);
-    let warnings = sites::warnings_for_site(&site_kind);
+    let warnings = if matching_presets
+        .first()
+        .is_some_and(|preset| preset.id == "youtube-channel-catalogue")
+    {
+        vec!["The catalogue includes the channel's standard Videos tab, not Shorts or livestream tabs.".to_string()]
+    } else {
+        sites::warnings_for_site(&site_kind)
+    };
 
     Ok(AnalyzeResult {
         normalized_url,
@@ -296,6 +334,27 @@ pub async fn start_download(
     let site = sites::detect_site(&normalized_url);
     let preset = presets::find_preset(&input.preset_id)
         .ok_or_else(|| format!("Unknown preset '{}'.", input.preset_id))?;
+    if matches!(
+        preset.pipeline,
+        crate::download::Pipeline::YoutubeChannelExport
+    ) {
+        let supplied_urls = if input.channel_urls.is_empty() {
+            vec![normalized_url.clone()]
+        } else {
+            input.channel_urls.clone()
+        };
+        let mut seen = HashSet::new();
+        input.channel_urls = supplied_urls
+            .iter()
+            .map(|url| sites::youtube_channel_videos_url(url))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|url| seen.insert(url.clone()))
+            .collect();
+        input.url = input.channel_urls[0].clone();
+    } else {
+        input.url = normalized_url.clone();
+    }
     if site == crate::download::SiteKind::Reddit && !tools::has_available_impersonation_target(&app)
     {
         return Err(
@@ -515,6 +574,67 @@ pub async fn update_settings(
 ) -> CommandResult<Settings> {
     state.update_settings(&input)?;
     settings_with_defaults(&app, &state)
+}
+
+#[tauri::command]
+pub async fn list_youtube_api_keys(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<YoutubeApiKeyInfo>> {
+    let ids = state.youtube_api_key_ids()?;
+    Ok(ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| YoutubeApiKeyInfo {
+            id,
+            label: format!("YouTube API key {}", index + 1),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn add_youtube_api_key(
+    state: State<'_, AppState>,
+    input: AddYoutubeApiKeyInput,
+) -> CommandResult<Vec<YoutubeApiKeyInfo>> {
+    let api_key = input.api_key.trim();
+    if api_key.is_empty() {
+        return Err("Enter a YouTube API key.".to_string());
+    }
+    let mut ids = state.youtube_api_key_ids()?;
+    let existing_keys = youtube_api_keys::load_all(&ids)?;
+    if existing_keys.iter().any(|existing| existing == api_key) {
+        return Err("That YouTube API key is already saved.".to_string());
+    }
+
+    let id = Uuid::new_v4().to_string();
+    youtube_api_keys::store(&id, api_key)?;
+    ids.push(id.clone());
+    if let Err(error) = state.set_youtube_api_key_ids(&ids) {
+        let _ = youtube_api_keys::remove(&id);
+        return Err(error);
+    }
+    list_youtube_api_keys(state).await
+}
+
+#[tauri::command]
+pub async fn remove_youtube_api_key(
+    state: State<'_, AppState>,
+    input: RemoveYoutubeApiKeyInput,
+) -> CommandResult<Vec<YoutubeApiKeyInfo>> {
+    let mut ids = state.youtube_api_key_ids()?;
+    if !ids.iter().any(|id| id == &input.id) {
+        return Err("YouTube API key not found.".to_string());
+    }
+    let api_key = youtube_api_keys::load_optional(&input.id)?;
+    youtube_api_keys::remove(&input.id)?;
+    ids.retain(|id| id != &input.id);
+    if let Err(error) = state.set_youtube_api_key_ids(&ids) {
+        if let Some(api_key) = api_key {
+            let _ = youtube_api_keys::store(&input.id, &api_key);
+        }
+        return Err(error);
+    }
+    list_youtube_api_keys(state).await
 }
 
 fn settings_with_defaults(app: &AppHandle, state: &AppState) -> CommandResult<Settings> {
