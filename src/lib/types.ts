@@ -107,6 +107,7 @@ export type StartDownloadRequest = {
   channelUrls?: string[]
   presetId: string
   outputDir?: string | null
+  exportName?: string | null
   filenameTemplate?: string | null
   auth: AuthSource
   advanced?: AdvancedDownloadOptions | null

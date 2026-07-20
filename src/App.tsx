@@ -173,8 +173,32 @@ const autoQualityValue = "__auto__"
 const allRunPresetsValue = "__all_presets__"
 const runsPanelDomId = "runs-panel"
 
+function youtubeExportNameError(value: string): string | null {
+  const name = value.trim()
+  if (!name) return "Enter a name for this export."
+  if ([...name].length > 80) return "Use 80 characters or fewer."
+  if (
+    name === "." ||
+    name === ".." ||
+    name.endsWith(".") ||
+    [...name].some(
+      (character) =>
+        character.charCodeAt(0) < 32 || '<>:"/\\|?*'.includes(character)
+    )
+  ) {
+    return 'Do not use path separators or < > : " | ? *, or end with a period.'
+  }
+  if (
+    /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)
+  ) {
+    return "Choose a different name; this one is reserved by Windows."
+  }
+  return null
+}
+
 function App() {
   const [url, setUrl] = useState("")
+  const [youtubeExportName, setYoutubeExportName] = useState("")
   const [activeTab, setActiveTab] = useState<AppTab>("download")
   const [runPresetFilter, setRunPresetFilter] = useState(allRunPresetsValue)
   const [analysesByUrl, setAnalysesByUrl] = useState<
@@ -502,6 +526,14 @@ function App() {
     const analysis = analysesByUrl[sourceUrl]
     if (!analysis) return false
 
+    if (preset.id === "youtube-channel-catalogue") {
+      const exportNameError = youtubeExportNameError(youtubeExportName)
+      if (exportNameError) {
+        setError(exportNameError)
+        return false
+      }
+    }
+
     const key = advancedKey(analysis.normalizedUrl, preset.id)
     const auth = authForPreset(preset, settings.auth)
     if (preset.auth === "required" && !isAuthConfigured(auth)) {
@@ -528,6 +560,10 @@ function App() {
           : undefined,
       presetId: preset.id,
       outputDir: settings.defaultOutputDir,
+      exportName:
+        preset.id === "youtube-channel-catalogue"
+          ? youtubeExportName.trim()
+          : undefined,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
       auth,
       advanced: advancedByPreset[key] ?? defaultAdvancedOptions,
@@ -969,6 +1005,7 @@ function App() {
                               selectedPresetId={presetId ?? null}
                               jobs={jobs}
                               outputDir={settings.defaultOutputDir}
+                              exportName={youtubeExportName}
                               auth={
                                 preset
                                   ? authForPreset(preset, settings.auth)
@@ -988,6 +1025,7 @@ function App() {
                                     : undefined
                                 )
                               }
+                              onExportNameChange={setYoutubeExportName}
                               onStart={() =>
                                 preset
                                   ? handleStart(inputUrl, preset)
@@ -1782,11 +1820,13 @@ type DownloadLinkCardProps = {
   selectedPresetId: string | null
   jobs: Job[]
   outputDir?: string | null
+  exportName: string
   auth: AuthSource
   advancedOptions: AdvancedDownloadOptions
   formatInfo: FormatAnalysis | null
   loadingFormats: boolean
   onPresetChange: (presetId: string | null) => void
+  onExportNameChange: (name: string) => void
   onStart: () => void
   onCancel: (jobId: string) => void
   onCopyLogs: (job: Job) => void
@@ -1804,11 +1844,13 @@ function DownloadLinkCard({
   selectedPresetId,
   jobs,
   outputDir,
+  exportName,
   auth,
   advancedOptions,
   formatInfo,
   loadingFormats,
   onPresetChange,
+  onExportNameChange,
   onStart,
   onCancel,
   onCopyLogs,
@@ -1829,6 +1871,10 @@ function DownloadLinkCard({
     job && !["completed", "failed", "canceled"].includes(job.status)
   const presetAuth = preset?.auth ?? "none"
   const canUseAuth = isAuthConfigured(auth)
+  const exportNameError =
+    preset?.pipeline === "youtube_channel_export"
+      ? youtubeExportNameError(exportName)
+      : null
 
   return (
     <div className="rounded-lg border bg-card p-4">
@@ -1906,12 +1952,45 @@ function DownloadLinkCard({
 
           {!running ? (
             <>
+              {preset.pipeline === "youtube_channel_export" ? (
+                <div className="space-y-1">
+                  <Label
+                    htmlFor="youtube-export-name"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Export name
+                  </Label>
+                  <input
+                    id="youtube-export-name"
+                    value={exportName}
+                    maxLength={80}
+                    placeholder="e.g. AI channels July"
+                    aria-invalid={Boolean(exportNameError)}
+                    className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none"
+                    onChange={(event) =>
+                      onExportNameChange(event.target.value)
+                    }
+                  />
+                  <div
+                    className={cn(
+                      "text-xs",
+                      exportNameError
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    )}
+                  >
+                    {exportNameError ??
+                      "A completed export with the same name will never be overwritten."}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
                   <div className="text-xs text-muted-foreground">Output</div>
                   <div className="mt-0.5 truncate">
                     {preset.pipeline === "youtube_channel_export"
-                      ? `${outputDir ?? "Downloads"}/youtube_export`
+                      ? `${outputDir ?? "Downloads"}/youtube_export/${exportName.trim() || "<export name>"}`
                       : (outputDir ?? "Downloads")}
                   </div>
                 </div>
@@ -1940,7 +2019,7 @@ function DownloadLinkCard({
                 <Button
                   type="button"
                   className="gap-2"
-                  disabled={analyzing}
+                  disabled={analyzing || Boolean(exportNameError)}
                   onClick={onStart}
                 >
                   <Download className="size-4" />

@@ -365,6 +365,26 @@ pub async fn start_download(
     if input.output_dir.as_deref().unwrap_or_default().is_empty() {
         input.output_dir.clone_from(&settings.default_output_dir);
     }
+    if matches!(
+        preset.pipeline,
+        crate::download::Pipeline::YoutubeChannelExport
+    ) {
+        let export_name =
+            crate::download::normalized_youtube_export_name(input.export_name.as_deref())?;
+        let export_dir = Path::new(input.output_dir.as_deref().unwrap_or("."))
+            .join("youtube_export")
+            .join(&export_name);
+        if ["youtube_videos.json", "youtube_videos.xlsx"]
+            .iter()
+            .any(|filename| export_dir.join(filename).exists())
+        {
+            return Err(format!(
+                "An export named '{export_name}' already exists at {}. Choose a different name to preserve the existing files.",
+                export_dir.display()
+            ));
+        }
+        input.export_name = Some(export_name);
+    }
     if matches!(input.auth, AuthSource::None) && preset.auth == AuthRequirement::Required {
         input.auth = settings.auth.clone();
     }

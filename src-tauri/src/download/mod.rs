@@ -242,9 +242,91 @@ pub struct StartDownloadRequest {
     pub channel_urls: Vec<String>,
     pub preset_id: String,
     pub output_dir: Option<String>,
+    pub export_name: Option<String>,
     pub filename_template: Option<String>,
     pub auth: AuthSource,
     pub advanced: Option<AdvancedDownloadOptions>,
+}
+
+pub(crate) fn normalized_youtube_export_name(value: Option<&str>) -> Result<String, String> {
+    let value = value.unwrap_or_default().trim();
+    if value.is_empty() {
+        return Err("Enter an export name before starting the channel catalogue.".to_string());
+    }
+    if value.chars().count() > 80 {
+        return Err("The export name must be 80 characters or fewer.".to_string());
+    }
+    if value == "."
+        || value == ".."
+        || value.ends_with('.')
+        || value
+            .chars()
+            .any(|character| character.is_control() || "<>:\"/\\|?*".contains(character))
+    {
+        return Err(
+            "The export name cannot contain path separators or < > : \" | ? * and cannot end with a period."
+                .to_string(),
+        );
+    }
+
+    let windows_stem = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved_windows_name = matches!(
+        windows_stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved_windows_name {
+        return Err(
+            "Choose a different export name; that name is reserved by Windows.".to_string(),
+        );
+    }
+
+    Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod export_name_tests {
+    use super::normalized_youtube_export_name;
+
+    #[test]
+    fn accepts_and_trims_a_user_export_name() {
+        assert_eq!(
+            normalized_youtube_export_name(Some("  AI channels July  ")).unwrap(),
+            "AI channels July"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_unsafe_export_names() {
+        assert!(normalized_youtube_export_name(None).is_err());
+        assert!(normalized_youtube_export_name(Some("../existing")).is_err());
+        assert!(normalized_youtube_export_name(Some("channel/export")).is_err());
+        assert!(normalized_youtube_export_name(Some("CON")).is_err());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

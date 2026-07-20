@@ -354,7 +354,9 @@ pub fn run(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let output_dir = output_root.join("youtube_export");
+    let export_name =
+        crate::download::normalized_youtube_export_name(input.export_name.as_deref())?;
+    let output_dir = output_root.join("youtube_export").join(export_name);
     fs::create_dir_all(&output_dir)
         .map_err(|error| format!("Could not create {}: {error}", output_dir.display()))?;
 
