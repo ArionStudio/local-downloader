@@ -6,15 +6,15 @@ on:
       tag:
         description: "Release tag to inspect"
         required: true
-        default: "app-v0.1.11"
+        default: "app-v0.1.12"
       dmg_asset:
         description: "DMG asset name"
         required: true
-        default: "macos_dmg_aarch64_Downloader_0.1.11.dmg"
+        default: "macos_dmg_aarch64_Downloader_0.1.12.dmg"
       app_asset:
         description: "App tarball asset name"
         required: true
-        default: "macos_app_aarch64_Downloader_0.1.11.app.tar.gz"
+        default: "macos_app_aarch64_Downloader_0.1.12.app.tar.gz"
 
 jobs:
   diagnose:

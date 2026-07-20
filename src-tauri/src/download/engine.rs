@@ -92,8 +92,8 @@ pub fn analyze_formats(
     let mut last_error = None;
 
     for attempt in attempts {
-        let target_url = if is_linkedin_feed_update_url(url) {
-            resolve_linkedin_feed_stream_url(yt_dlp.as_path(), url, &attempt.auth)
+        let target_url = if let Some(feed_url) = linkedin_feed_update_url(url) {
+            resolve_linkedin_feed_stream_url(yt_dlp.as_path(), &feed_url, &attempt.auth)
                 .unwrap_or_else(|_| url.to_string())
         } else if is_x_article_url(url) {
             resolve_x_article_video_urls(yt_dlp.as_path(), url, &attempt.auth)
@@ -237,38 +237,41 @@ fn run_download_inner(
         }
     }
 
-    if is_linkedin_feed_update_preset(&preset) && is_linkedin_feed_update_url(&input.url) {
-        match run_linkedin_feed_stream_attempts(
-            &app,
-            &state,
-            &job_id,
-            &input,
-            &preset,
-            ffmpeg_location.clone(),
-            yt_dlp.as_path(),
-            &cancel_flag,
-            &attempts,
-        )? {
-            Some(AttemptOutcome::Succeeded | AttemptOutcome::Canceled) => return Ok(()),
-            Some(AttemptOutcome::Failed(error)) => {
-                log(
-                    &app,
-                    &state,
-                    &job_id,
-                    "error",
-                    &format!("LinkedIn resolved stream failed: {error}"),
-                )?;
-                mark_failed(&app, &state, &job_id, &error)?;
-                return Ok(());
-            }
-            None => {
-                log(
-                    &app,
-                    &state,
-                    &job_id,
-                    "warn",
-                    "Could not resolve a LinkedIn stream from feed HTML; trying the standard extractor.",
-                )?;
+    if is_linkedin_video_post_preset(&preset) {
+        if let Some(feed_url) = linkedin_feed_update_url(&input.url) {
+            match run_linkedin_feed_stream_attempts(
+                &app,
+                &state,
+                &job_id,
+                &input,
+                &feed_url,
+                &preset,
+                ffmpeg_location.clone(),
+                yt_dlp.as_path(),
+                &cancel_flag,
+                &attempts,
+            )? {
+                Some(AttemptOutcome::Succeeded | AttemptOutcome::Canceled) => return Ok(()),
+                Some(AttemptOutcome::Failed(error)) => {
+                    log(
+                        &app,
+                        &state,
+                        &job_id,
+                        "error",
+                        &format!("LinkedIn resolved stream failed: {error}"),
+                    )?;
+                    mark_failed(&app, &state, &job_id, &error)?;
+                    return Ok(());
+                }
+                None => {
+                    log(
+                        &app,
+                        &state,
+                        &job_id,
+                        "warn",
+                        "Could not resolve a LinkedIn stream from feed HTML; trying the standard extractor.",
+                    )?;
+                }
             }
         }
     }
@@ -490,6 +493,7 @@ fn run_linkedin_feed_stream_attempts(
     state: &commands::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
+    page_url: &str,
     preset: &Preset,
     ffmpeg_location: Option<String>,
     yt_dlp: &Path,
@@ -521,7 +525,7 @@ fn run_linkedin_feed_stream_attempts(
             &format!("Resolving LinkedIn feed stream ({}).", attempt.label),
         )?;
 
-        let stream_url = match resolve_linkedin_feed_stream_url(yt_dlp, &input.url, &attempt.auth) {
+        let stream_url = match resolve_linkedin_feed_stream_url(yt_dlp, page_url, &attempt.auth) {
             Ok(stream_url) => stream_url,
             Err(error) => {
                 if let Some(source) = targeted_chrome_cookie_source(&attempt.auth, &error) {
@@ -533,7 +537,7 @@ fn run_linkedin_feed_stream_attempts(
                         "Retrying LinkedIn feed stream with direct Chrome cookie export.",
                     )?;
                     match resolve_linkedin_feed_stream_url_with_chrome_export(
-                        yt_dlp, &input.url, &source,
+                        yt_dlp, page_url, &source,
                     ) {
                         Ok(stream_url) => stream_url,
                         Err(retry_error) => {
@@ -1530,13 +1534,16 @@ fn x_temp_suffix() -> String {
     format!("{}-{millis}", std::process::id())
 }
 
-fn is_linkedin_feed_update_preset(preset: &Preset) -> bool {
-    preset.id == "linkedin-feed-update-video-highest"
+fn is_linkedin_video_post_preset(preset: &Preset) -> bool {
+    matches!(
+        preset.id.as_str(),
+        "linkedin-post-video-highest" | "linkedin-feed-update-video-highest"
+    )
 }
 
-fn is_linkedin_feed_update_url(input: &str) -> bool {
+fn linkedin_feed_update_url(input: &str) -> Option<String> {
     let Ok(url) = Url::parse(input) else {
-        return false;
+        return None;
     };
     let host = url
         .host_str()
@@ -1544,7 +1551,28 @@ fn is_linkedin_feed_update_url(input: &str) -> bool {
         .trim_start_matches("www.")
         .to_ascii_lowercase();
 
-    host.ends_with("linkedin.com") && url.path().to_ascii_lowercase().starts_with("/feed/update/")
+    if host != "linkedin.com" && !host.ends_with(".linkedin.com") {
+        return None;
+    }
+
+    let path = url.path();
+    let feed_match = Regex::new(r"(?i)^/feed/update/urn:li:(activity|ugcpost):(\d+)/?$")
+        .ok()?
+        .captures(path);
+    let post_match = Regex::new(r"(?i)^/posts/.+-(activity|ugcpost)-(\d+)-[^/]+/?$")
+        .ok()?
+        .captures(path);
+    let captures = feed_match.or(post_match)?;
+    let urn_kind = if captures.get(1)?.as_str().eq_ignore_ascii_case("ugcpost") {
+        "ugcPost"
+    } else {
+        "activity"
+    };
+    let id = captures.get(2)?.as_str();
+
+    Some(format!(
+        "https://www.linkedin.com/feed/update/urn:li:{urn_kind}:{id}/"
+    ))
 }
 
 fn resolve_linkedin_feed_stream_url(
@@ -2305,6 +2333,32 @@ mod tests {
         assert!(summary.contains("chrome cookies: desktop keyring"));
         assert!(summary.contains("chromium cookies: cookie database not found"));
         assert!(summary.contains("firefox cookies: cookie database not found"));
+    }
+
+    #[test]
+    fn converts_linkedin_ugc_post_share_url_to_feed_update_url() {
+        let url = "https://www.linkedin.com/posts/esther-choy-82a45658_ar-xr-mr-ugcPost-7483278057709985792-Em6y/?utm_source=social_share_send&utm_medium=ios_app";
+
+        assert_eq!(
+            linkedin_feed_update_url(url).as_deref(),
+            Some("https://www.linkedin.com/feed/update/urn:li:ugcPost:7483278057709985792/")
+        );
+    }
+
+    #[test]
+    fn normalizes_linkedin_activity_feed_update_url() {
+        let url = "https://linkedin.com/feed/update/urn:li:activity:7477578240379985920/?utm_source=share";
+
+        assert_eq!(
+            linkedin_feed_update_url(url).as_deref(),
+            Some("https://www.linkedin.com/feed/update/urn:li:activity:7477578240379985920/")
+        );
+        assert_eq!(
+            linkedin_feed_update_url(
+                "https://notlinkedin.com/feed/update/urn:li:activity:7477578240379985920/"
+            ),
+            None
+        );
     }
 
     #[test]
