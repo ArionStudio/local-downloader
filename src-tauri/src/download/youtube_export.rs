@@ -29,7 +29,7 @@ const YOUTUBE_API_RETRIES: usize = 4;
 const DISCOVERY_SLEEP_REQUESTS: f64 = 0.25;
 const FALLBACK_SLEEP_REQUESTS: f64 = 2.0;
 
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "channel_name",
     "title",
     "video_url",
@@ -41,6 +41,7 @@ const FIELDS: [&str; 11] = [
     "language",
     "view_count",
     "subscriber_count",
+    "content_type",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,32 @@ struct VideoRecord {
     language: Option<String>,
     view_count: Option<i64>,
     subscriber_count: Option<i64>,
+    #[serde(default)]
+    content_type: YoutubeContentType,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum YoutubeContentType {
+    #[default]
+    Video,
+    Short,
+}
+
+impl YoutubeContentType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Video => "video",
+            Self::Short => "short",
+        }
+    }
+
+    fn video_url(self, video_id: &str) -> String {
+        match self {
+            Self::Video => format!("https://www.youtube.com/watch?v={video_id}"),
+            Self::Short => format!("https://www.youtube.com/shorts/{video_id}"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -364,9 +391,10 @@ pub fn run(
     let errors_path = output_dir.join("errors.json");
     let json_path = output_dir.join("youtube_videos.json");
     let excel_path = output_dir.join("youtube_videos.xlsx");
-    let mut records_by_url = load_checkpoint(&checkpoint_path)?;
+    let mut records_by_id = load_checkpoint(&checkpoint_path)?;
     let mut errors = Vec::new();
     let mut video_urls = Vec::new();
+    let mut content_types_by_id = HashMap::new();
 
     update_phase(
         app,
@@ -417,16 +445,13 @@ pub fn run(
             "No YouTube API keys are saved; metadata will use the yt-dlp fallback.",
         )?;
     }
-    if !records_by_url.is_empty() {
+    if !records_by_id.is_empty() {
         log(
             app,
             state,
             job_id,
             "info",
-            &format!(
-                "Resuming with {} checkpointed videos.",
-                records_by_url.len()
-            ),
+            &format!("Resuming with {} checkpointed videos.", records_by_id.len()),
         )?;
     }
 
@@ -452,6 +477,20 @@ pub fn run(
             };
             if !success {
                 let error = process_error(&stderr);
+                if is_missing_shorts_tab(&listing_url, &error) {
+                    log(
+                        app,
+                        state,
+                        job_id,
+                        "info",
+                        &format!(
+                            "[{}/{}] Shorts tab is not present; skipping.",
+                            index + 1,
+                            input.channel_urls.len()
+                        ),
+                    )?;
+                    continue;
+                }
                 errors.push(ExportError {
                     url: listing_url.clone(),
                     error: error.clone(),
@@ -469,6 +508,19 @@ pub fn run(
             match serde_json::from_slice::<Value>(&stdout) {
                 Ok(info) => {
                     let discovered = listing_video_urls(&info);
+                    let content_type = listing_content_type(&listing_url);
+                    for video_url in &discovered {
+                        if let Some(video_id) = video_id_from_url(video_url) {
+                            content_types_by_id
+                                .entry(video_id)
+                                .and_modify(|existing| {
+                                    if content_type == YoutubeContentType::Short {
+                                        *existing = YoutubeContentType::Short;
+                                    }
+                                })
+                                .or_insert(content_type);
+                        }
+                    }
                     log(
                         app,
                         state,
@@ -501,8 +553,23 @@ pub fn run(
         )?;
     }
 
-    let mut seen = HashSet::new();
-    video_urls.retain(|url| seen.insert(url.clone()));
+    let mut seen_ids = HashSet::new();
+    video_urls.retain(|url| {
+        video_id_from_url(url)
+            .map(|video_id| seen_ids.insert(video_id))
+            .unwrap_or_else(|| seen_ids.insert(url.clone()))
+    });
+    for (video_id, content_type) in &content_types_by_id {
+        let Some(record) = records_by_id.get_mut(video_id) else {
+            continue;
+        };
+        let video_url = content_type.video_url(video_id);
+        if record.content_type != *content_type || record.video_url != video_url {
+            record.content_type = *content_type;
+            record.video_url = video_url;
+            append_checkpoint(&checkpoint_path, record)?;
+        }
+    }
     log(
         app,
         state,
@@ -521,7 +588,8 @@ pub fn run(
             job_id,
             client,
             &video_urls,
-            &mut records_by_url,
+            &content_types_by_id,
+            &mut records_by_id,
             &checkpoint_path,
             &mut errors,
             cancel_flag,
@@ -539,7 +607,12 @@ pub fn run(
                 mark_canceled(app, state, job_id)?;
                 return Ok(());
             }
-            if !records_by_url.contains_key(video_url) {
+            let record_key = video_id_from_url(video_url).unwrap_or_else(|| video_url.clone());
+            if !records_by_id.contains_key(&record_key) {
+                let content_type = content_types_by_id
+                    .get(&record_key)
+                    .copied()
+                    .unwrap_or_default();
                 let args = common_args(FALLBACK_SLEEP_REQUESTS)
                     .into_iter()
                     .chain([
@@ -559,11 +632,11 @@ pub fn run(
                         stderr: _,
                     } if success => match serde_json::from_slice::<Value>(&stdout)
                         .map_err(|error| error.to_string())
-                        .and_then(|info| video_record(&info))
+                        .and_then(|info| video_record(&info, content_type))
                     {
                         Ok(record) => {
                             append_checkpoint(&checkpoint_path, &record)?;
-                            records_by_url.insert(record.video_url.clone(), record);
+                            records_by_id.insert(record_key.clone(), record);
                         }
                         Err(error) => errors.push(ExportError {
                             url: video_url.clone(),
@@ -602,7 +675,7 @@ pub fn run(
         94.0,
         "Writing JSON and Excel",
     )?;
-    let mut records = records_by_url.into_values().collect::<Vec<_>>();
+    let mut records = records_by_id.into_values().collect::<Vec<_>>();
     records.sort_by(|left, right| right.published_at.cmp(&left.published_at));
     write_json(&json_path, &records)?;
     write_excel(&excel_path, &records)?;
@@ -658,14 +731,19 @@ fn fetch_api_metadata(
     job_id: &str,
     client: &YouTubeApiPool,
     video_urls: &[String],
-    records_by_url: &mut HashMap<String, VideoRecord>,
+    content_types_by_id: &HashMap<String, YoutubeContentType>,
+    records_by_id: &mut HashMap<String, VideoRecord>,
     checkpoint_path: &Path,
     errors: &mut Vec<ExportError>,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let pending_urls = video_urls
         .iter()
-        .filter(|url| !records_by_url.contains_key(*url))
+        .filter(|url| {
+            video_id_from_url(url)
+                .map(|video_id| !records_by_id.contains_key(&video_id))
+                .unwrap_or(true)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let pending = pending_urls
@@ -812,7 +890,7 @@ fn fetch_api_metadata(
             Some((name, subscriber_counts.get(&channel_id).copied().flatten()))
         })
         .collect::<HashMap<_, _>>();
-    for record in records_by_url.values_mut() {
+    for record in records_by_id.values_mut() {
         let Some(channel_name) = record.channel_name.as_ref() else {
             continue;
         };
@@ -839,9 +917,13 @@ fn fetch_api_metadata(
         let Some(item) = items_by_id.get(&video_id) else {
             continue;
         };
-        let record = api_video_record(item, &subscriber_counts, &category_names)?;
+        let content_type = content_types_by_id
+            .get(&video_id)
+            .copied()
+            .unwrap_or_default();
+        let record = api_video_record(item, &subscriber_counts, &category_names, content_type)?;
         append_checkpoint(checkpoint_path, &record)?;
-        records_by_url.insert(record.video_url.clone(), record);
+        records_by_id.insert(video_id, record);
     }
     Ok(())
 }
@@ -850,6 +932,7 @@ fn api_video_record(
     item: &Value,
     subscriber_counts: &HashMap<String, Option<i64>>,
     category_names: &HashMap<String, String>,
+    content_type: YoutubeContentType,
 ) -> Result<VideoRecord, String> {
     let video_id = value_string(item, "id").ok_or_else(|| "Video ID missing".to_string())?;
     let snippet = item.get("snippet").unwrap_or(&Value::Null);
@@ -863,7 +946,7 @@ fn api_video_record(
     Ok(VideoRecord {
         channel_name: value_string(snippet, "channelTitle"),
         title: value_string(snippet, "title"),
-        video_url: format!("https://www.youtube.com/watch?v={video_id}"),
+        video_url: content_type.video_url(&video_id),
         description: value_string(snippet, "description").unwrap_or_default(),
         published_at: value_string(snippet, "publishedAt"),
         duration: value_string(content_details, "duration")
@@ -874,6 +957,7 @@ fn api_video_record(
             .or_else(|| value_string(snippet, "defaultLanguage")),
         view_count: optional_int(statistics.get("viewCount")),
         subscriber_count: subscriber_counts.get(&channel_id).copied().flatten(),
+        content_type,
     })
 }
 
@@ -900,10 +984,18 @@ fn api_duration(value: &str) -> Option<String> {
 }
 
 fn video_id_from_url(video_url: &str) -> Option<String> {
-    Url::parse(video_url)
-        .ok()?
+    let url = Url::parse(video_url).ok()?;
+    if let Some(video_id) = url
         .query_pairs()
         .find_map(|(name, value)| (name == "v").then(|| value.into_owned()))
+    {
+        return Some(video_id);
+    }
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["shorts", video_id, ..] if !video_id.is_empty() => Some((*video_id).to_string()),
+        _ => None,
+    }
 }
 
 fn sorted_unique_strings(values: impl Iterator<Item = String>) -> Vec<String> {
@@ -1040,11 +1132,25 @@ fn channel_listing_urls(
 }
 
 fn listing_name(listing_url: &str) -> &'static str {
-    if listing_url.ends_with("/shorts") {
-        "Shorts"
-    } else {
-        "Videos"
+    match listing_content_type(listing_url) {
+        YoutubeContentType::Video => "Videos",
+        YoutubeContentType::Short => "Shorts",
     }
+}
+
+fn listing_content_type(listing_url: &str) -> YoutubeContentType {
+    if listing_url.ends_with("/shorts") {
+        YoutubeContentType::Short
+    } else {
+        YoutubeContentType::Video
+    }
+}
+
+fn is_missing_shorts_tab(listing_url: &str, error: &str) -> bool {
+    listing_url.ends_with("/shorts")
+        && error
+            .to_ascii_lowercase()
+            .contains("does not have a shorts tab")
 }
 
 fn canonical_video_url(info: &Value) -> Option<String> {
@@ -1054,8 +1160,11 @@ fn canonical_video_url(info: &Value) -> Option<String> {
         .or_else(|| value_string(info, "url"))
 }
 
-fn video_record(info: &Value) -> Result<VideoRecord, String> {
-    let video_url = canonical_video_url(info).ok_or_else(|| "Video URL missing".to_string())?;
+fn video_record(info: &Value, content_type: YoutubeContentType) -> Result<VideoRecord, String> {
+    let video_url = value_string(info, "id")
+        .map(|video_id| content_type.video_url(&video_id))
+        .or_else(|| canonical_video_url(info))
+        .ok_or_else(|| "Video URL missing".to_string())?;
     Ok(VideoRecord {
         channel_name: value_string(info, "channel").or_else(|| value_string(info, "uploader")),
         title: value_string(info, "title"),
@@ -1068,6 +1177,7 @@ fn video_record(info: &Value) -> Result<VideoRecord, String> {
         language: value_string(info, "language"),
         view_count: optional_int(info.get("view_count")),
         subscriber_count: optional_int(info.get("channel_follower_count")),
+        content_type,
     })
 }
 
@@ -1141,13 +1251,16 @@ fn load_checkpoint(path: &Path) -> Result<HashMap<String, VideoRecord>, String> 
     let mut records = HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         if let Ok(record) = serde_json::from_str::<VideoRecord>(&line) {
-            records.insert(record.video_url.clone(), record);
+            let record_key =
+                video_id_from_url(&record.video_url).unwrap_or_else(|| record.video_url.clone());
+            records.insert(record_key, record);
         }
     }
     Ok(records)
 }
 
 fn append_checkpoint(path: &Path, record: &VideoRecord) -> Result<(), String> {
+    ensure_parent_directory(path)?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1159,6 +1272,7 @@ fn append_checkpoint(path: &Path, record: &VideoRecord) -> Result<(), String> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    ensure_parent_directory(path)?;
     let mut file = File::create(path).map_err(|error| error.to_string())?;
     serde_json::to_writer_pretty(&mut file, value).map_err(|error| error.to_string())?;
     file.write_all(b"\n").map_err(|error| error.to_string())
@@ -1207,9 +1321,12 @@ fn write_excel(path: &Path, records: &[VideoRecord]) -> Result<(), String> {
                 .write_number(row, 10, value as f64)
                 .map_err(|error| error.to_string())?;
         }
+        worksheet
+            .write_string(row, 11, record.content_type.as_str())
+            .map_err(|error| error.to_string())?;
     }
 
-    for (column, width) in [28, 55, 48, 90, 24, 14, 55, 30, 14, 16, 18]
+    for (column, width) in [28, 55, 48, 90, 24, 14, 55, 30, 14, 16, 18, 14]
         .into_iter()
         .enumerate()
     {
@@ -1223,7 +1340,19 @@ fn write_excel(path: &Path, records: &[VideoRecord]) -> Result<(), String> {
     worksheet
         .autofilter(0, 0, records.len() as u32, (FIELDS.len() - 1) as u16)
         .map_err(|error| error.to_string())?;
+    ensure_parent_directory(path)?;
     workbook.save(path).map_err(|error| error.to_string())
+}
+
+fn ensure_parent_directory(path: &Path) -> Result<(), String> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))
 }
 
 fn write_optional_string(
@@ -1338,14 +1467,15 @@ mod tests {
             "view_count": 42,
             "channel_follower_count": 1000
         });
-        let record = video_record(&info).unwrap();
+        let record = video_record(&info, YoutubeContentType::Short).unwrap();
 
-        assert_eq!(record.video_url, "https://www.youtube.com/watch?v=abc123");
+        assert_eq!(record.video_url, "https://www.youtube.com/shorts/abc123");
         assert_eq!(record.duration.as_deref(), Some("01:01:01"));
         assert_eq!(record.published_at.as_deref(), Some("2023-11-14T22:13:20Z"));
         assert_eq!(record.tags, ["one", "two"]);
         assert_eq!(record.view_count, Some(42));
         assert_eq!(record.subscriber_count, Some(1000));
+        assert_eq!(record.content_type, YoutubeContentType::Short);
     }
 
     #[test]
@@ -1367,6 +1497,30 @@ mod tests {
             channel_listing_urls(channel_url, &YoutubeCatalogueContent::Shorts).unwrap(),
             ["https://www.youtube.com/@example/shorts"]
         );
+        assert_eq!(
+            listing_content_type("https://www.youtube.com/@example/videos"),
+            YoutubeContentType::Video
+        );
+        assert_eq!(
+            listing_content_type("https://www.youtube.com/@example/shorts"),
+            YoutubeContentType::Short
+        );
+        assert_eq!(
+            video_id_from_url("https://www.youtube.com/shorts/abc123").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn recognizes_a_missing_shorts_tab_as_an_empty_listing() {
+        assert!(is_missing_shorts_tab(
+            "https://www.youtube.com/@example/shorts",
+            "ERROR: [youtube:tab] @example: This channel does not have a shorts tab"
+        ));
+        assert!(!is_missing_shorts_tab(
+            "https://www.youtube.com/@example/videos",
+            "ERROR: [youtube:tab] @example: This channel does not have a shorts tab"
+        ));
     }
 
     #[test]
@@ -1389,7 +1543,8 @@ mod tests {
         let subscribers = HashMap::from([("channel-1".to_string(), Some(1_000))]);
         let categories = HashMap::from([("27".to_string(), "Education".to_string())]);
 
-        let record = api_video_record(&item, &subscribers, &categories).unwrap();
+        let record =
+            api_video_record(&item, &subscribers, &categories, YoutubeContentType::Video).unwrap();
 
         assert_eq!(record.video_url, "https://www.youtube.com/watch?v=abc123");
         assert_eq!(record.duration.as_deref(), Some("26:03:04"));
@@ -1398,6 +1553,7 @@ mod tests {
         assert_eq!(record.language.as_deref(), Some("en-US"));
         assert_eq!(record.view_count, Some(42));
         assert_eq!(record.subscriber_count, Some(1_000));
+        assert_eq!(record.content_type, YoutubeContentType::Video);
     }
 
     #[test]
@@ -1419,11 +1575,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!("downloader-youtube-export-{suffix}"));
-        fs::create_dir_all(&directory).unwrap();
         let record = VideoRecord {
             channel_name: Some("Example".to_string()),
             title: Some("=Unsafe title".to_string()),
-            video_url: "https://www.youtube.com/watch?v=abc123".to_string(),
+            video_url: "https://www.youtube.com/shorts/abc123".to_string(),
             description: "Description".to_string(),
             published_at: Some("2026-07-17".to_string()),
             duration: Some("00:01:00".to_string()),
@@ -1432,9 +1587,10 @@ mod tests {
             language: Some("en".to_string()),
             view_count: Some(42),
             subscriber_count: Some(1000),
+            content_type: YoutubeContentType::Short,
         };
-        let json_path = directory.join("youtube_videos.json");
-        let excel_path = directory.join("youtube_videos.xlsx");
+        let json_path = directory.join("json").join("youtube_videos.json");
+        let excel_path = directory.join("excel").join("youtube_videos.xlsx");
 
         write_json(&json_path, &vec![record.clone()]).unwrap();
         write_excel(&excel_path, &[record]).unwrap();
@@ -1442,6 +1598,7 @@ mod tests {
         let json = fs::read_to_string(&json_path).unwrap();
         assert!(json.find("\"channel_name\"").unwrap() < json.find("\"title\"").unwrap());
         assert!(json.contains("\"title\": \"=Unsafe title\""));
+        assert!(json.contains("\"content_type\": \"short\""));
         assert_eq!(&fs::read(&excel_path).unwrap()[..2], b"PK");
         fs::remove_dir_all(directory).unwrap();
     }
