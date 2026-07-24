@@ -105,6 +105,7 @@ export type JobLog = {
 export type StartDownloadRequest = {
   url: string
   channelUrls?: string[]
+  youtubeCatalogueContent?: YoutubeCatalogueContent
   presetId: string
   outputDir?: string | null
   exportName?: string | null
@@ -112,6 +113,8 @@ export type StartDownloadRequest = {
   auth: AuthSource
   advanced?: AdvancedDownloadOptions | null
 }
+
+export type YoutubeCatalogueContent = "all" | "videos" | "shorts"
 
 export type FormatSelection =
   | { kind: "best" }

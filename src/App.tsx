@@ -40,6 +40,7 @@ import {
 import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   analyzeFormats,
   addYoutubeApiKey,
@@ -85,6 +86,7 @@ import type {
   SiteKind,
   StartDownloadRequest,
   ToolUpdate,
+  YoutubeCatalogueContent,
   YoutubeApiKeyInfo,
 } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -199,6 +201,8 @@ function youtubeExportNameError(value: string): string | null {
 function App() {
   const [url, setUrl] = useState("")
   const [youtubeExportName, setYoutubeExportName] = useState("")
+  const [youtubeCatalogueContent, setYoutubeCatalogueContent] =
+    useState<YoutubeCatalogueContent>("all")
   const [activeTab, setActiveTab] = useState<AppTab>("download")
   const [runPresetFilter, setRunPresetFilter] = useState(allRunPresetsValue)
   const [analysesByUrl, setAnalysesByUrl] = useState<
@@ -557,6 +561,10 @@ function App() {
                 )
               )
               .map((item) => item.normalizedUrl)
+          : undefined,
+      youtubeCatalogueContent:
+        preset.id === "youtube-channel-catalogue"
+          ? youtubeCatalogueContent
           : undefined,
       presetId: preset.id,
       outputDir: settings.defaultOutputDir,
@@ -1006,6 +1014,7 @@ function App() {
                               jobs={jobs}
                               outputDir={settings.defaultOutputDir}
                               exportName={youtubeExportName}
+                              catalogueContent={youtubeCatalogueContent}
                               auth={
                                 preset
                                   ? authForPreset(preset, settings.auth)
@@ -1026,6 +1035,9 @@ function App() {
                                 )
                               }
                               onExportNameChange={setYoutubeExportName}
+                              onCatalogueContentChange={
+                                setYoutubeCatalogueContent
+                              }
                               onStart={() =>
                                 preset
                                   ? handleStart(inputUrl, preset)
@@ -1821,12 +1833,14 @@ type DownloadLinkCardProps = {
   jobs: Job[]
   outputDir?: string | null
   exportName: string
+  catalogueContent: YoutubeCatalogueContent
   auth: AuthSource
   advancedOptions: AdvancedDownloadOptions
   formatInfo: FormatAnalysis | null
   loadingFormats: boolean
   onPresetChange: (presetId: string | null) => void
   onExportNameChange: (name: string) => void
+  onCatalogueContentChange: (content: YoutubeCatalogueContent) => void
   onStart: () => void
   onCancel: (jobId: string) => void
   onCopyLogs: (job: Job) => void
@@ -1845,12 +1859,14 @@ function DownloadLinkCard({
   jobs,
   outputDir,
   exportName,
+  catalogueContent,
   auth,
   advancedOptions,
   formatInfo,
   loadingFormats,
   onPresetChange,
   onExportNameChange,
+  onCatalogueContentChange,
   onStart,
   onCancel,
   onCopyLogs,
@@ -1953,34 +1969,69 @@ function DownloadLinkCard({
           {!running ? (
             <>
               {preset.pipeline === "youtube_channel_export" ? (
-                <div className="space-y-1">
-                  <Label
-                    htmlFor="youtube-export-name"
-                    className="text-xs text-muted-foreground"
-                  >
-                    Export name
-                  </Label>
-                  <input
-                    id="youtube-export-name"
-                    value={exportName}
-                    maxLength={80}
-                    placeholder="e.g. AI channels July"
-                    aria-invalid={Boolean(exportNameError)}
-                    className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none"
-                    onChange={(event) =>
-                      onExportNameChange(event.target.value)
-                    }
-                  />
-                  <div
-                    className={cn(
-                      "text-xs",
-                      exportNameError
-                        ? "text-destructive"
-                        : "text-muted-foreground"
-                    )}
-                  >
-                    {exportNameError ??
-                      "A completed export with the same name will never be overwritten."}
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <Label
+                      htmlFor="youtube-export-name"
+                      className="text-xs text-muted-foreground"
+                    >
+                      Export name
+                    </Label>
+                    <input
+                      id="youtube-export-name"
+                      value={exportName}
+                      maxLength={80}
+                      placeholder="e.g. AI channels July"
+                      aria-invalid={Boolean(exportNameError)}
+                      className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none"
+                      onChange={(event) =>
+                        onExportNameChange(event.target.value)
+                      }
+                    />
+                    <div
+                      className={cn(
+                        "text-xs",
+                        exportNameError
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      )}
+                    >
+                      {exportNameError ??
+                        "A completed export with the same name will never be overwritten."}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">
+                      Channel content
+                    </Label>
+                    <ToggleGroup
+                      value={[catalogueContent]}
+                      variant="outline"
+                      spacing={0}
+                      aria-label="Channel content"
+                      className="w-full"
+                      onValueChange={(values) => {
+                        const value = values[0]
+                        if (
+                          value === "all" ||
+                          value === "videos" ||
+                          value === "shorts"
+                        ) {
+                          onCatalogueContentChange(value)
+                        }
+                      }}
+                    >
+                      <ToggleGroupItem value="all" className="flex-1">
+                        All
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="videos" className="flex-1">
+                        Videos only
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="shorts" className="flex-1">
+                        Shorts only
+                      </ToggleGroupItem>
+                    </ToggleGroup>
                   </div>
                 </div>
               ) : null}

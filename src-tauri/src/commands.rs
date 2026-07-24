@@ -311,7 +311,10 @@ pub async fn analyze_url(input: AnalyzeInput) -> CommandResult<AnalyzeResult> {
         .first()
         .is_some_and(|preset| preset.id == "youtube-channel-catalogue")
     {
-        vec!["The catalogue includes the channel's standard Videos tab, not Shorts or livestream tabs.".to_string()]
+        vec![
+            "Choose whether the catalogue includes channel videos, Shorts, or both; livestream tabs are not included."
+                .to_string(),
+        ]
     } else {
         sites::warnings_for_site(&site_kind)
     };

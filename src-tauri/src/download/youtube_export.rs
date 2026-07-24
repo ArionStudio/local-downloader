@@ -1,4 +1,4 @@
-use super::{JobStatus, StartDownloadRequest};
+use super::{sites, JobStatus, StartDownloadRequest, YoutubeCatalogueContent};
 use crate::{commands, process_control, redaction, tools};
 use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
@@ -431,61 +431,64 @@ pub fn run(
     }
 
     for (index, channel_url) in input.channel_urls.iter().enumerate() {
-        let args = common_args(DISCOVERY_SLEEP_REQUESTS)
-            .into_iter()
-            .chain([
-                "--flat-playlist".to_string(),
-                "--dump-single-json".to_string(),
-                channel_url.clone(),
-            ])
-            .collect::<Vec<_>>();
-        let result = run_process(yt_dlp.as_path(), &args, state, job_id, cancel_flag)?;
-        let ProcessResult::Finished {
-            success,
-            stdout,
-            stderr,
-        } = result
-        else {
-            mark_canceled(app, state, job_id)?;
-            return Ok(());
-        };
-        if !success {
-            let error = process_error(&stderr);
-            errors.push(ExportError {
-                url: channel_url.clone(),
-                error: error.clone(),
-            });
-            log(
-                app,
-                state,
-                job_id,
-                "error",
-                &format!("Could not read {channel_url}: {error}"),
-            )?;
-            continue;
-        }
-
-        match serde_json::from_slice::<Value>(&stdout) {
-            Ok(info) => {
-                let discovered = listing_video_urls(&info);
+        for listing_url in channel_listing_urls(channel_url, &input.youtube_catalogue_content)? {
+            let args = common_args(DISCOVERY_SLEEP_REQUESTS)
+                .into_iter()
+                .chain([
+                    "--flat-playlist".to_string(),
+                    "--dump-single-json".to_string(),
+                    listing_url.clone(),
+                ])
+                .collect::<Vec<_>>();
+            let result = run_process(yt_dlp.as_path(), &args, state, job_id, cancel_flag)?;
+            let ProcessResult::Finished {
+                success,
+                stdout,
+                stderr,
+            } = result
+            else {
+                mark_canceled(app, state, job_id)?;
+                return Ok(());
+            };
+            if !success {
+                let error = process_error(&stderr);
+                errors.push(ExportError {
+                    url: listing_url.clone(),
+                    error: error.clone(),
+                });
                 log(
                     app,
                     state,
                     job_id,
-                    "info",
-                    &format!(
-                        "[{}/{}] Channel discovery completed: {} videos.",
-                        index + 1,
-                        input.channel_urls.len(),
-                        discovered.len()
-                    ),
+                    "error",
+                    &format!("Could not read {listing_url}: {error}"),
                 )?;
-                video_urls.extend(discovered);
+                continue;
             }
-            Err(error) => errors.push(ExportError {
-                url: channel_url.clone(),
-                error: format!("Invalid yt-dlp channel metadata: {error}"),
-            }),
+
+            match serde_json::from_slice::<Value>(&stdout) {
+                Ok(info) => {
+                    let discovered = listing_video_urls(&info);
+                    log(
+                        app,
+                        state,
+                        job_id,
+                        "info",
+                        &format!(
+                            "[{}/{}] {} discovery completed: {} videos.",
+                            index + 1,
+                            input.channel_urls.len(),
+                            listing_name(&listing_url),
+                            discovered.len()
+                        ),
+                    )?;
+                    video_urls.extend(discovered);
+                }
+                Err(error) => errors.push(ExportError {
+                    url: listing_url,
+                    error: format!("Invalid yt-dlp channel metadata: {error}"),
+                }),
+            }
         }
         let progress = 5.0 + 25.0 * (index + 1) as f64 / input.channel_urls.len() as f64;
         update_phase(
@@ -1018,6 +1021,32 @@ fn listing_video_urls(info: &Value) -> Vec<String> {
         .collect()
 }
 
+fn channel_listing_urls(
+    channel_url: &str,
+    content: &YoutubeCatalogueContent,
+) -> Result<Vec<String>, String> {
+    match content {
+        YoutubeCatalogueContent::All => Ok(vec![
+            sites::youtube_channel_videos_url(channel_url)?,
+            sites::youtube_channel_shorts_url(channel_url)?,
+        ]),
+        YoutubeCatalogueContent::Videos => {
+            Ok(vec![sites::youtube_channel_videos_url(channel_url)?])
+        }
+        YoutubeCatalogueContent::Shorts => {
+            Ok(vec![sites::youtube_channel_shorts_url(channel_url)?])
+        }
+    }
+}
+
+fn listing_name(listing_url: &str) -> &'static str {
+    if listing_url.ends_with("/shorts") {
+        "Shorts"
+    } else {
+        "Videos"
+    }
+}
+
 fn canonical_video_url(info: &Value) -> Option<String> {
     value_string(info, "id")
         .map(|id| format!("https://www.youtube.com/watch?v={id}"))
@@ -1317,6 +1346,27 @@ mod tests {
         assert_eq!(record.tags, ["one", "two"]);
         assert_eq!(record.view_count, Some(42));
         assert_eq!(record.subscriber_count, Some(1000));
+    }
+
+    #[test]
+    fn selects_the_requested_channel_tabs() {
+        let channel_url = "https://www.youtube.com/@example/videos";
+
+        assert_eq!(
+            channel_listing_urls(channel_url, &YoutubeCatalogueContent::All).unwrap(),
+            [
+                "https://www.youtube.com/@example/videos",
+                "https://www.youtube.com/@example/shorts",
+            ]
+        );
+        assert_eq!(
+            channel_listing_urls(channel_url, &YoutubeCatalogueContent::Videos).unwrap(),
+            ["https://www.youtube.com/@example/videos"]
+        );
+        assert_eq!(
+            channel_listing_urls(channel_url, &YoutubeCatalogueContent::Shorts).unwrap(),
+            ["https://www.youtube.com/@example/shorts"]
+        );
     }
 
     #[test]

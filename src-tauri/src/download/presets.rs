@@ -53,7 +53,7 @@ pub fn all_presets() -> Vec<Preset> {
             "youtube-channel-catalogue",
             &[SiteKind::Youtube],
             "YouTube Channel Catalogue",
-            "Export public channel video metadata to youtube_videos.json and youtube_videos.xlsx.",
+            "Export public channel video and Shorts metadata to youtube_videos.json and youtube_videos.xlsx.",
             OutputKind::Data,
             Pipeline::YoutubeChannelExport,
             AuthRequirement::None,

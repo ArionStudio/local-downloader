@@ -12,6 +12,14 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
 }
 
 pub fn youtube_channel_videos_url(input: &str) -> Result<String, String> {
+    youtube_channel_tab_url(input, "videos")
+}
+
+pub fn youtube_channel_shorts_url(input: &str) -> Result<String, String> {
+    youtube_channel_tab_url(input, "shorts")
+}
+
+fn youtube_channel_tab_url(input: &str, tab: &str) -> Result<String, String> {
     let mut url = Url::parse(input.trim()).map_err(|_| "Enter a valid URL.".to_string())?;
     let host = url
         .host_str()
@@ -43,7 +51,8 @@ pub fn youtube_channel_videos_url(input: &str) -> Result<String, String> {
 
     let mut path = segments[..identity_len].join("/");
     path.insert(0, '/');
-    path.push_str("/videos");
+    path.push('/');
+    path.push_str(tab);
     url.set_scheme("https")
         .map_err(|_| "Invalid YouTube URL.".to_string())?;
     url.set_host(Some("www.youtube.com"))
@@ -190,6 +199,18 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(youtube_channel_videos_url(input).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn normalizes_supported_youtube_channel_links_to_shorts_tab() {
+        assert_eq!(
+            youtube_channel_shorts_url("https://youtube.com/@anthropic-ai/videos").unwrap(),
+            "https://www.youtube.com/@anthropic-ai/shorts"
+        );
+        assert_eq!(
+            youtube_channel_shorts_url("https://youtube.com/channel/UC123/about").unwrap(),
+            "https://www.youtube.com/channel/UC123/shorts"
+        );
     }
 
     #[test]

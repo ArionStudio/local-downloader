@@ -61,7 +61,7 @@ export const presets: Preset[] = [
     siteKinds: ["youtube"],
     label: "YouTube Channel Catalogue",
     description:
-      "Export public channel video metadata to youtube_videos.json and youtube_videos.xlsx.",
+      "Export public channel video and Shorts metadata to youtube_videos.json and youtube_videos.xlsx.",
     outputKind: "data",
     pipeline: "youtube_channel_export",
     auth: "none",
@@ -177,7 +177,7 @@ export function analyzeLocally(input: string): AnalyzeResult {
   const warnings =
     matching[0]?.id === "youtube-channel-catalogue"
       ? [
-          "The catalogue includes the channel's standard Videos tab, not Shorts or livestream tabs.",
+          "Choose whether the catalogue includes channel videos, Shorts, or both; livestream tabs are not included.",
         ]
       : warningsForSite(siteKind)
 

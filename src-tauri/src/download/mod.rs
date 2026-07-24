@@ -240,12 +240,23 @@ pub struct StartDownloadRequest {
     pub url: String,
     #[serde(default)]
     pub channel_urls: Vec<String>,
+    #[serde(default)]
+    pub youtube_catalogue_content: YoutubeCatalogueContent,
     pub preset_id: String,
     pub output_dir: Option<String>,
     pub export_name: Option<String>,
     pub filename_template: Option<String>,
     pub auth: AuthSource,
     pub advanced: Option<AdvancedDownloadOptions>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum YoutubeCatalogueContent {
+    #[default]
+    All,
+    Videos,
+    Shorts,
 }
 
 pub(crate) fn normalized_youtube_export_name(value: Option<&str>) -> Result<String, String> {
