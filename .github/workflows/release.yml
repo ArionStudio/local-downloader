@@ -17,16 +17,29 @@ jobs:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
+            isMac: true
             assetPrefix: macos
             args: "--target aarch64-apple-darwin --bundles app,dmg"
+            rustTarget: aarch64-apple-darwin
+            macArch: arm64
+            tauriScript: ""
+          - name: macOS Intel
+            platform: macos-latest
+            isMac: true
+            assetPrefix: macos
+            args: "--target x86_64-apple-darwin --bundles app,dmg"
+            rustTarget: x86_64-apple-darwin
+            macArch: x86_64
             tauriScript: ""
           - name: Ubuntu deb
             platform: ubuntu-22.04
+            isMac: false
             assetPrefix: ubuntu
             args: "--bundles deb"
             tauriScript: ""
           - name: Arch CachyOS AppImage
             platform: ubuntu-22.04
+            isMac: false
             assetPrefix: arch
             args: "--bundles appimage"
             tauriScript: "./scripts/tauri-appimage-build.sh"
@@ -53,14 +66,14 @@ jobs:
           cache: pnpm
 
       - name: Setup Rust
-        if: matrix.platform != 'macos-latest'
+        if: ${{ !matrix.isMac }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Rust macOS targets
-        if: matrix.platform == 'macos-latest'
+        if: matrix.isMac
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.rustTarget }}
 
       - name: Cache Rust
         uses: swatinem/rust-cache@v2
@@ -70,54 +83,11 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Configure macOS signing
-        if: matrix.platform == 'macos-latest'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Configure ad-hoc macOS signing
+        if: matrix.isMac
         run: |
-          set -euo pipefail
-
-          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            echo "APPLE_CERTIFICATE is not configured; using ad-hoc macOS signing."
-            exit 0
-          fi
-
-          for variable in APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!variable:-}" ]; then
-              echo "$variable is required when APPLE_CERTIFICATE is configured." >&2
-              exit 1
-            fi
-          done
-
-          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
-          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
-          security find-identity -v -p codesigning build.keychain
-
-          certificate_info="$(security find-identity -v -p codesigning build.keychain | grep 'Developer ID Application' | head -n 1 || true)"
-          if [ -z "$certificate_info" ]; then
-            echo "No Developer ID Application identity found in APPLE_CERTIFICATE." >&2
-            exit 1
-          fi
-
-          certificate_name="$(printf '%s\n' "$certificate_info" | awk -F'"' '{print $2}')"
-          echo "APPLE_SIGNING_IDENTITY=$certificate_name" >> "$GITHUB_ENV"
-          {
-            echo "APPLE_ID=$APPLE_ID"
-            echo "APPLE_PASSWORD=$APPLE_PASSWORD"
-            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
-          } >> "$GITHUB_ENV"
-          echo "Configured Developer ID signing identity."
+          echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          echo "Configured ad-hoc signing; this build will not be notarized by Apple."
 
       - name: Build and upload release
         uses: tauri-apps/tauri-action@v1
@@ -128,9 +98,53 @@ jobs:
         with:
           tagName: app-v__VERSION__
           releaseName: "Downloader v__VERSION__"
-          releaseBody: "Download the installer for your platform. The app updater uses latest.json from this release."
-          releaseDraft: false
+          releaseBody: |
+            Download the installer for your platform. The app updater uses latest.json from this release.
+
+            macOS builds are ad-hoc signed and are not notarized by Apple. On first launch, macOS users must allow Downloader in System Settings → Privacy & Security → Open Anyway.
+          # Keep artifacts private until every platform build and integrity
+          # check below has succeeded.
+          releaseDraft: true
           prerelease: false
           releaseAssetNamePattern: "${{ matrix.assetPrefix }}_[bundle]_[arch]_[name]_[version][ext]"
           tauriScript: ${{ matrix.tauriScript }}
           args: ${{ matrix.args }}
+
+      - name: Verify ad-hoc-signed macOS bundle
+        if: matrix.isMac
+        env:
+          EXPECTED_ARCH: ${{ matrix.macArch }}
+          RUST_TARGET: ${{ matrix.rustTarget }}
+        run: |
+          set -euo pipefail
+
+          app="$(find "src-tauri/target/$RUST_TARGET/release/bundle/macos" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          if [ -z "$app" ]; then
+            echo "No macOS app bundle was produced." >&2
+            exit 1
+          fi
+
+          executable="$app/Contents/MacOS/Downloader"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          signature_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
+          printf '%s\n' "$signature_info"
+          printf '%s\n' "$signature_info" | grep -F "Signature=adhoc"
+          printf '%s\n' "$signature_info" | grep -F "TeamIdentifier=not set"
+          lipo -archs "$executable" | tr ' ' '\n' | grep -Fx "$EXPECTED_ARCH"
+
+  publish:
+    name: Publish verified release
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="app-v$(jq -r '.version' package.json)"
+          gh release edit "$tag" --draft=false --latest

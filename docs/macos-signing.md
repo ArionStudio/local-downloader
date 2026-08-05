@@ -1,71 +1,59 @@
-# macOS Signing and Notarization
+# macOS Ad-Hoc Releases
 
-macOS releases are built by `.github/workflows/release.yml`. The workflow signs with an Apple Developer ID certificate when the Apple secrets below are configured. If `APPLE_CERTIFICATE` is missing, it falls back to ad-hoc signing for internal testing.
+This project publishes macOS builds without a paid Apple Developer Program membership. The release workflow uses Apple's ad-hoc signing identity (`-`), which is required for reliable Apple Silicon binaries but does not identify a verified developer and does not notarize the app.
 
-## Required Apple Account
+No Apple certificate, Team ID, Apple ID, or notarization secrets are required.
 
-Use a paid Apple Developer Program account. The certificate type for distribution outside the Mac App Store is `Developer ID Application`.
+## Release Behavior
 
-## Create the Certificate
+The workflow builds separate installers for:
 
-1. On a Mac, open Keychain Access.
-2. Use Certificate Assistant to create a Certificate Signing Request.
-3. In Apple Developer Certificates, IDs & Profiles, create a `Developer ID Application` certificate with that CSR.
-4. Download and open the `.cer` file so it appears in Keychain Access under `My Certificates`.
-5. Expand the certificate, confirm the private key is present, then export the certificate plus private key as a `.p12` file.
-6. Give the `.p12` export a strong password.
+- Apple Silicon Macs (`aarch64-apple-darwin`);
+- Intel Macs (`x86_64-apple-darwin`).
 
-Convert the `.p12` to a single-line base64 value:
+It verifies that each app bundle:
+
+- has a valid ad-hoc code signature;
+- contains the expected CPU architecture;
+- was packaged successfully as a DMG and updater archive.
+
+All platform artifacts remain in a draft GitHub release until every build and integrity check succeeds. The Tauri updater artifacts remain cryptographically signed with the existing, non-Apple updater secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+## Gatekeeper Limitation
+
+Ad-hoc signing is not Developer ID signing. Apple Gatekeeper will not identify the app as coming from a verified developer, and users must approve it manually the first time they open it.
+
+After copying **Downloader** to Applications:
+
+1. Try to open the app and dismiss the Apple verification warning.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll to the Security section and click **Open Anyway** for Downloader.
+4. Confirm **Open**. macOS remembers the choice for that app.
+
+Do not tell users to disable Gatekeeper globally or run `xattr -cr` as the normal installation method.
+
+## Publish a Release
+
+Increment the version in both `package.json` and `src-tauri/tauri.conf.json`, commit it, and push the matching tag. For example, version `0.1.15` uses:
 
 ```bash
-openssl base64 -A -in DeveloperIDApplication.p12 -out apple-certificate-base64.txt
+git tag app-v0.1.15
+git push origin app-v0.1.15
 ```
 
-Find the signing identity locally:
+Only after every platform succeeds does the workflow publish the draft release.
 
-```bash
-security find-identity -v -p codesigning
-```
+For an independent package check, run the **mac release diagnostics** workflow and enter the new tag. It automatically downloads and validates every Mac DMG and updater tarball. This validates packaging and the ad-hoc signature; it does not and cannot prove Gatekeeper acceptance.
 
-The workflow finds the `Developer ID Application` identity automatically after importing the `.p12`.
+## Optional Future Upgrade
 
-## GitHub Secrets
-
-Add these repository secrets:
-
-```text
-APPLE_CERTIFICATE            contents of apple-certificate-base64.txt
-APPLE_CERTIFICATE_PASSWORD   password used when exporting the .p12
-KEYCHAIN_PASSWORD            random CI-only keychain password
-APPLE_ID                     Apple Developer account email
-APPLE_PASSWORD               app-specific password for the Apple ID
-APPLE_TEAM_ID                Apple Developer Team ID
-```
-
-Keep the existing Tauri updater signing secrets:
-
-```text
-TAURI_SIGNING_PRIVATE_KEY
-TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-```
-
-## Release and Verify
-
-After adding secrets, create the next `app-v*` tag to run the release workflow.
-
-Then run the `mac release diagnostics` workflow against the new tag. A notarized release should show:
-
-```text
-codesign --verify ... exit status: 0
-spctl -a -vv --type execute ... accepted
-TeamIdentifier=<your team id>
-Signature=...
-```
-
-If `spctl` still says `rejected`, open the release job logs and search for notarization, staple, or Apple credential errors.
+If the project later joins the paid Apple Developer Program, replace ad-hoc signing with a `Developer ID Application` certificate and Apple notarization. That removes the manual Gatekeeper approval for users.
 
 ## References
 
-- Tauri macOS signing: https://v2.tauri.app/distribute/sign/macos/
-- Apple notarization overview: https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution
-- Apple Developer ID: https://developer.apple.com/developer-id/
+- [Tauri macOS code signing and ad-hoc signing](https://v2.tauri.app/distribute/sign/macos/)
+- [Apple: safely open apps on your Mac](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unidentified-developer-mh40616/mac)
+- [Apple Developer membership comparison](https://developer.apple.com/support/compare-memberships/)

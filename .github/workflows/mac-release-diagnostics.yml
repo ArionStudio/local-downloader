@@ -6,104 +6,115 @@ on:
       tag:
         description: "Release tag to inspect"
         required: true
-        default: "app-v0.1.14"
-      dmg_asset:
-        description: "DMG asset name"
-        required: true
-        default: "macos_dmg_aarch64_Downloader_0.1.14.dmg"
-      app_asset:
-        description: "App tarball asset name"
-        required: true
-        default: "macos_app_aarch64_Downloader_0.1.14.app.tar.gz"
+        default: "app-v0.1.15"
 
 jobs:
   diagnose:
-    name: Inspect macOS release assets
+    name: Verify ad-hoc macOS release assets
     runs-on: macos-latest
     permissions:
       contents: read
     steps:
-      - name: Download release assets
+      - name: Download all macOS release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
-          DMG_ASSET: ${{ inputs.dmg_asset }}
-          APP_ASSET: ${{ inputs.app_asset }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p artifacts
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$DMG_ASSET" --dir artifacts
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$APP_ASSET" --dir artifacts
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'macos_dmg_*.dmg' \
+            --pattern 'macos_app_*.app.tar.gz' \
+            --dir artifacts
+
+          shopt -s nullglob
+          assets=(artifacts/*)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No macOS DMG or updater app assets found in $TAG." >&2
+            exit 1
+          fi
           ls -lah artifacts
           file artifacts/*
           shasum -a 256 artifacts/*
 
-      - name: Verify and inspect DMG
-        env:
-          DMG_ASSET: ${{ inputs.dmg_asset }}
+      - name: Verify every DMG
         run: |
-          set -uo pipefail
-          dmg="artifacts/$DMG_ASSET"
-          mount_dir="$(mktemp -d)"
-
-          run_check() {
-            echo "::group::$*"
-            set +e
-            "$@"
-            status=$?
-            set -e
-            echo "exit status: $status"
-            echo "::endgroup::"
-          }
-
-          run_check hdiutil verify "$dmg"
-          run_check hdiutil imageinfo "$dmg"
-
-          set -e
-          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
-          trap 'hdiutil detach "$mount_dir" || true' EXIT
-
-          find "$mount_dir" -maxdepth 3 -print
-          app="$(find "$mount_dir" -maxdepth 2 -name '*.app' -type d | head -n 1)"
-          if [ -z "$app" ]; then
-            echo "No .app bundle found in DMG."
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(artifacts/macos_dmg_*.dmg)
+          if [ "${#dmgs[@]}" -eq 0 ]; then
+            echo "No macOS DMG assets were downloaded." >&2
             exit 1
           fi
 
-          echo "App in DMG: $app"
-          run_check plutil -p "$app/Contents/Info.plist"
-          run_check codesign --verify --deep --strict --verbose=4 "$app"
-          run_check codesign -dv --verbose=4 "$app"
-          run_check spctl -a -vv --type execute "$app"
-          run_check xattr -lr "$app"
+          mounted=""
+          cleanup() {
+            if [ -n "$mounted" ]; then
+              hdiutil detach "$mounted" || true
+            fi
+          }
+          trap cleanup EXIT
 
-      - name: Inspect updater app tarball
-        env:
-          APP_ASSET: ${{ inputs.app_asset }}
+          verify_app() {
+            app="$1"
+            echo "Verifying $app"
+            plutil -p "$app/Contents/Info.plist"
+            codesign --verify --deep --strict --verbose=4 "$app"
+
+            signature_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
+            printf '%s\n' "$signature_info"
+            printf '%s\n' "$signature_info" | grep -F "Signature=adhoc"
+            printf '%s\n' "$signature_info" | grep -F "TeamIdentifier=not set"
+          }
+
+          for dmg in "${dmgs[@]}"; do
+            echo "Verifying $dmg"
+            hdiutil verify "$dmg"
+            mount_dir="$(mktemp -d)"
+            hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+            mounted="$mount_dir"
+
+            app="$(find "$mount_dir" -maxdepth 2 -name '*.app' -type d -print -quit)"
+            if [ -z "$app" ]; then
+              echo "No app bundle found in $dmg." >&2
+              exit 1
+            fi
+            verify_app "$app"
+
+            hdiutil detach "$mount_dir"
+            mounted=""
+          done
+
+      - name: Verify every updater app tarball
         run: |
-          set -uo pipefail
-          mkdir -p app-tarball
-          tar -xzf "artifacts/$APP_ASSET" -C app-tarball
-          find app-tarball -maxdepth 3 -print
-          app="$(find app-tarball -maxdepth 3 -name '*.app' -type d | head -n 1)"
-          if [ -z "$app" ]; then
-            echo "No .app bundle found in app tarball."
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=(artifacts/macos_app_*.app.tar.gz)
+          if [ "${#tarballs[@]}" -eq 0 ]; then
+            echo "No macOS updater app tarballs were downloaded." >&2
             exit 1
           fi
 
-          run_check() {
-            echo "::group::$*"
-            set +e
-            "$@"
-            status=$?
-            set -e
-            echo "exit status: $status"
-            echo "::endgroup::"
+          verify_app() {
+            app="$1"
+            echo "Verifying $app"
+            plutil -p "$app/Contents/Info.plist"
+            codesign --verify --deep --strict --verbose=4 "$app"
+
+            signature_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
+            printf '%s\n' "$signature_info"
+            printf '%s\n' "$signature_info" | grep -F "Signature=adhoc"
+            printf '%s\n' "$signature_info" | grep -F "TeamIdentifier=not set"
           }
 
-          echo "App in tarball: $app"
-          run_check plutil -p "$app/Contents/Info.plist"
-          run_check codesign --verify --deep --strict --verbose=4 "$app"
-          run_check codesign -dv --verbose=4 "$app"
-          run_check spctl -a -vv --type execute "$app"
-          run_check xattr -lr "$app"
+          for tarball in "${tarballs[@]}"; do
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$tarball" -C "$extract_dir"
+            app="$(find "$extract_dir" -maxdepth 3 -name '*.app' -type d -print -quit)"
+            if [ -z "$app" ]; then
+              echo "No app bundle found in $tarball." >&2
+              exit 1
+            fi
+            verify_app "$app"
+          done

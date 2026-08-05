@@ -31,6 +31,8 @@ cd src-tauri && cargo check
 pnpm tauri build --no-bundle
 ```
 
+GitHub releases include ad-hoc-signed builds for Apple Silicon and Intel Macs. They do not require an Apple Developer membership, but users must approve the app under **System Settings → Privacy & Security → Open Anyway** on first launch. See [docs/macos-signing.md](docs/macos-signing.md) for release and installation details.
+
 Presets describe page shapes such as LinkedIn post, LinkedIn article, Reddit post, Reddit multiple media, or Crunchyroll video. All presets target the highest quality video available.
 
 YouTube channel links (`/@handle`, `/channel/...`, `/c/...`, and `/user/...`) also offer a **YouTube Channel Catalogue** preset. Paste one or several channel links into the main input; they are grouped into one result and one **Export all channels** action. Before starting, enter an export name and choose **All**, **Videos only**, or **Shorts only**; the combined catalogue is written to `youtube_export/<export name>/youtube_videos.json` and `youtube_export/<export name>/youtube_videos.xlsx`. Each exported item includes a `content_type` value of `video` or `short`, and Shorts use their `youtube.com/shorts/...` link. A completed export with the same name is never overwritten. The export reads the selected Videos and/or Shorts tabs, excludes livestream tabs, and checkpoints completed video metadata so interrupted runs can resume.
