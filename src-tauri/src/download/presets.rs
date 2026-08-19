@@ -121,6 +121,15 @@ pub fn all_presets() -> Vec<Preset> {
             Pipeline::HttpResolveThenDownload,
             AuthRequirement::Optional,
         ),
+        preset(
+            "gamefam-case-study-video-highest",
+            &[SiteKind::Gamefam],
+            "Gamefam Case Study Video",
+            "Resolve the embedded Squarespace stream and save the highest quality video.",
+            OutputKind::Video,
+            Pipeline::HttpResolveThenDownload,
+            AuthRequirement::None,
+        ),
     ]
 }
 
@@ -237,5 +246,14 @@ mod tests {
         assert!(video
             .iter()
             .all(|preset| preset.id != "youtube-channel-catalogue"));
+    }
+
+    #[test]
+    fn matches_gamefam_preset_without_auth() {
+        let presets = matching_presets(&SiteKind::Gamefam);
+
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].id, "gamefam-case-study-video-highest");
+        assert_eq!(presets[0].auth, AuthRequirement::None);
     }
 }

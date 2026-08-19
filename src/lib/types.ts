@@ -7,6 +7,7 @@ export type SiteKind =
   | "x"
   | "vimeo"
   | "sawhorse"
+  | "gamefam"
   | "direct_hls"
   | "direct_file"
 

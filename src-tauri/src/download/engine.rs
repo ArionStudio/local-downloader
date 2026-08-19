@@ -92,7 +92,9 @@ pub fn analyze_formats(
     let mut last_error = None;
 
     for attempt in attempts {
-        let target_url = if let Some(feed_url) = linkedin_feed_update_url(url) {
+        let target_url = if is_gamefam_url(url) {
+            resolve_gamefam_video_url(url)?
+        } else if let Some(feed_url) = linkedin_feed_update_url(url) {
             resolve_linkedin_feed_stream_url(yt_dlp.as_path(), &feed_url, &attempt.auth)
                 .unwrap_or_else(|_| url.to_string())
         } else if is_x_article_url(url) {
@@ -200,6 +202,25 @@ fn run_download_inner(
     let attempts = auth_attempts(&input.auth, fallback_auth);
     let mut last_error = None;
     let mut attempt_errors = Vec::<(String, String)>::new();
+
+    if is_gamefam_case_study_preset(&preset) {
+        log(
+            &app,
+            &state,
+            &job_id,
+            "info",
+            "Resolving the embedded Gamefam Squarespace video stream.",
+        )?;
+        if input
+            .filename_template
+            .as_deref()
+            .map_or(true, str::is_empty)
+        {
+            input.filename_template = gamefam_case_study_filename(&input.url)
+                .map(|filename| format!("{filename}.%(ext)s"));
+        }
+        input.url = resolve_gamefam_video_url(&input.url)?;
+    }
 
     if is_x_article_preset(&preset) && is_x_article_url(&input.url) {
         match run_x_article_video_attempts(
@@ -1541,6 +1562,93 @@ fn is_linkedin_video_post_preset(preset: &Preset) -> bool {
     )
 }
 
+fn is_gamefam_case_study_preset(preset: &Preset) -> bool {
+    preset.id == "gamefam-case-study-video-highest"
+}
+
+fn is_gamefam_url(input: &str) -> bool {
+    let Ok(url) = Url::parse(input) else {
+        return false;
+    };
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
+
+    host == "gamefam.com"
+}
+
+fn gamefam_case_study_filename(input: &str) -> Option<String> {
+    let url = Url::parse(input).ok()?;
+    let slug = url
+        .path_segments()?
+        .next_back()?
+        .strip_prefix("case-study-")?;
+    let filename = slug
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .collect::<String>();
+
+    (!filename.is_empty()).then_some(filename)
+}
+
+fn resolve_gamefam_video_url(page_url: &str) -> Result<String, String> {
+    if !is_gamefam_url(page_url) {
+        return Err("Gamefam video resolution requires a gamefam.com URL.".to_string());
+    }
+
+    let html = http_get_gamefam_text(page_url)?;
+    extract_gamefam_video_url(&html).ok_or_else(|| {
+        "This Gamefam page does not expose an embedded Squarespace video. The video may have been removed."
+            .to_string()
+    })
+}
+
+fn http_get_gamefam_text(url: &str) -> Result<String, String> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", X_USER_AGENT)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .call()
+        .map_err(|error| format!("Gamefam page request failed: {error}"))?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| format!("Could not read the Gamefam page response: {error}"))
+}
+
+fn extract_gamefam_video_url(html: &str) -> Option<String> {
+    let normalized = html
+        .replace("\\/", "/")
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&#x22;", "\"")
+        .replace("&#X22;", "\"")
+        .replace("&amp;", "&");
+    let regex = Regex::new(r#""alexandriaUrl"\s*:\s*"([^"]+)""#).ok()?;
+    let base_url = regex.captures(&normalized)?.get(1)?.as_str();
+    if !base_url.contains("{variant}") {
+        return None;
+    }
+
+    let playlist_url = base_url.replace("{variant}", "playlist.m3u8");
+    let parsed = Url::parse(&playlist_url).ok()?;
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
+
+    (parsed.scheme() == "https"
+        && host == "video.squarespace-cdn.com"
+        && parsed.path().ends_with("/playlist.m3u8"))
+    .then_some(playlist_url)
+}
+
 fn linkedin_feed_update_url(input: &str) -> Option<String> {
     let Ok(url) = Url::parse(input) else {
         return None;
@@ -2272,6 +2380,38 @@ fn fail_job(app: &AppHandle, state: &commands::AppState, job_id: &str, error: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_gamefam_squarespace_playlist_url() {
+        let html = r#"
+            <div
+              data-config-video="{&quot;systemDataSourceType&quot;:&quot;mp4&quot;,&quot;alexandriaUrl&quot;:&quot;https://video.squarespace-cdn.com/content/v1/site-id/video-id/{variant}&quot;}"
+            ></div>
+        "#;
+
+        assert_eq!(
+            extract_gamefam_video_url(html).as_deref(),
+            Some(
+                "https://video.squarespace-cdn.com/content/v1/site-id/video-id/playlist.m3u8"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_non_squarespace_gamefam_video_targets() {
+        let html = r#"&quot;alexandriaUrl&quot;:&quot;https://example.com/video/{variant}&quot;"#;
+
+        assert_eq!(extract_gamefam_video_url(html), None);
+    }
+
+    #[test]
+    fn derives_gamefam_case_study_filename() {
+        assert_eq!(
+            gamefam_case_study_filename("https://gamefam.com/case-study-old-navy?source=test")
+                .as_deref(),
+            Some("old-navy")
+        );
+    }
 
     #[test]
     fn reports_chrome_keyring_cookie_import_failure() {

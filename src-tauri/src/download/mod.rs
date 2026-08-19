@@ -17,6 +17,7 @@ pub enum SiteKind {
     X,
     Vimeo,
     Sawhorse,
+    Gamefam,
     DirectHls,
     DirectFile,
 }
@@ -32,6 +33,7 @@ impl SiteKind {
             SiteKind::X => "x",
             SiteKind::Vimeo => "vimeo",
             SiteKind::Sawhorse => "sawhorse",
+            SiteKind::Gamefam => "gamefam",
             SiteKind::DirectHls => "direct_hls",
             SiteKind::DirectFile => "direct_file",
         }
@@ -46,6 +48,7 @@ impl SiteKind {
             "x" => SiteKind::X,
             "vimeo" => SiteKind::Vimeo,
             "sawhorse" => SiteKind::Sawhorse,
+            "gamefam" => SiteKind::Gamefam,
             "direct_hls" => SiteKind::DirectHls,
             "direct_file" => SiteKind::DirectFile,
             _ => SiteKind::Generic,

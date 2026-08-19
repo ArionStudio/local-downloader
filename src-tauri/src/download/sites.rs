@@ -116,6 +116,10 @@ pub fn detect_site(input: &str) -> SiteKind {
         return SiteKind::Sawhorse;
     }
 
+    if host == "gamefam.com" {
+        return SiteKind::Gamefam;
+    }
+
     SiteKind::Generic
 }
 
@@ -218,5 +222,17 @@ mod tests {
         assert!(youtube_channel_videos_url("https://youtube.com/watch?v=abc").is_err());
         assert!(youtube_channel_videos_url("https://youtube.com/playlist?list=abc").is_err());
         assert!(youtube_channel_videos_url("https://youtu.be/abc").is_err());
+    }
+
+    #[test]
+    fn detects_gamefam_case_study_urls() {
+        assert_eq!(
+            detect_site("https://gamefam.com/case-study-old-navy"),
+            SiteKind::Gamefam
+        );
+        assert_eq!(
+            detect_site("https://www.gamefam.com/case-study-coldplay"),
+            SiteKind::Gamefam
+        );
     }
 }

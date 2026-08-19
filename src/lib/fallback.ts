@@ -132,6 +132,16 @@ export const presets: Preset[] = [
     pipeline: "http_resolve_then_download",
     auth: "optional",
   },
+  {
+    id: "gamefam-case-study-video-highest",
+    siteKinds: ["gamefam"],
+    label: "Gamefam Case Study Video",
+    description:
+      "Resolve the embedded Squarespace stream and save the highest quality video.",
+    outputKind: "video",
+    pipeline: "http_resolve_then_download",
+    auth: "none",
+  },
 ]
 
 export function detectSite(input: string): SiteKind {
@@ -149,6 +159,7 @@ export function detectSite(input: string): SiteKind {
     if (host === "x.com" || host === "twitter.com") return "x"
     if (host.endsWith("vimeo.com")) return "vimeo"
     if (host.endsWith("sawhorsela.com")) return "sawhorse"
+    if (host === "gamefam.com") return "gamefam"
 
     return "generic"
   } catch {
