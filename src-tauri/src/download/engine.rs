@@ -207,48 +207,37 @@ fn run_download_inner(
     let attempts = auth_attempts(&input.auth, fallback_auth);
     let mut last_error = None;
     let mut attempt_errors = Vec::<(String, String)>::new();
-    let mut page_dump_pending = false;
-
     if is_generic_page_video_preset(&preset) && should_resolve_embedded_page(&input.url) {
-        match resolve_embedded_page_video_url(&input.url) {
-            Ok(Some(media_url)) => {
+        match run_page_video_attempts(
+            &app,
+            &state,
+            &job_id,
+            &input,
+            &preset,
+            ffmpeg_location.clone(),
+            yt_dlp.as_path(),
+            &cancel_flag,
+            &attempts,
+        )? {
+            Some(AttemptOutcome::Succeeded | AttemptOutcome::Canceled) => return Ok(()),
+            Some(AttemptOutcome::Failed(error)) => {
                 log(
                     &app,
                     &state,
                     &job_id,
-                    "info",
-                    "Found an embedded page video; downloading its media stream.",
+                    "error",
+                    &format!("Page video resolution failed: {error}"),
                 )?;
-                if input
-                    .filename_template
-                    .as_deref()
-                    .map_or(true, str::is_empty)
-                {
-                    input.filename_template = page_media_filename(&input.url)
-                        .map(|filename| format!("{filename}.%(ext)s"));
-                }
-                input.url = media_url;
+                mark_failed(&app, &state, &job_id, &error)?;
+                return Ok(());
             }
-            Ok(None) => {
-                page_dump_pending = true;
-                log(
-                    &app,
-                    &state,
-                    &job_id,
-                    "info",
-                    "No embedded media descriptor was found in the public HTML; checking extractor page data.",
-                )?;
-            }
-            Err(error) => {
-                page_dump_pending = true;
+            None => {
                 log(
                     &app,
                     &state,
                     &job_id,
                     "warn",
-                    &format!(
-                        "Could not inspect the public HTML ({error}); checking extractor page data."
-                    ),
+                    "Could not resolve embedded page videos; trying the standard extractor.",
                 )?;
             }
         }
@@ -331,43 +320,6 @@ fn run_download_inner(
 
     for (index, attempt) in attempts.iter().enumerate() {
         input.auth = attempt.auth.clone();
-        if page_dump_pending {
-            match resolve_embedded_page_video_url_from_dump(
-                yt_dlp.as_path(),
-                &input.url,
-                &attempt.auth,
-            ) {
-                Ok(Some(media_url)) => {
-                    log(
-                        &app,
-                        &state,
-                        &job_id,
-                        "info",
-                        "Found embedded media in extractor page data.",
-                    )?;
-                    if input
-                        .filename_template
-                        .as_deref()
-                        .map_or(true, str::is_empty)
-                    {
-                        input.filename_template = page_media_filename(&input.url)
-                            .map(|filename| format!("{filename}.%(ext)s"));
-                    }
-                    input.url = media_url;
-                    page_dump_pending = false;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    log(
-                        &app,
-                        &state,
-                        &job_id,
-                        "warn",
-                        &format!("Could not inspect extractor page data: {error}"),
-                    )?;
-                }
-            }
-        }
         let phase = if index == 0 {
             format!("Starting yt-dlp ({})", attempt.label)
         } else {
@@ -437,6 +389,227 @@ enum AttemptOutcome {
     Succeeded,
     Failed(String),
     Canceled,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_page_video_attempts(
+    app: &AppHandle,
+    state: &commands::AppState,
+    job_id: &str,
+    input: &StartDownloadRequest,
+    preset: &Preset,
+    ffmpeg_location: Option<String>,
+    yt_dlp: &Path,
+    cancel_flag: &Arc<AtomicBool>,
+    attempts: &[AuthAttempt],
+) -> Result<Option<AttemptOutcome>, String> {
+    let (mut targets, mut preferred_attempt) = match resolve_embedded_page_video_urls(&input.url) {
+        Ok(targets) => (targets, None),
+        Err(error) => {
+            log(
+                app,
+                state,
+                job_id,
+                "warn",
+                &format!(
+                    "Could not inspect the public HTML ({error}); checking extractor page data."
+                ),
+            )?;
+            (Vec::new(), None)
+        }
+    };
+
+    if targets.is_empty() {
+        log(
+            app,
+            state,
+            job_id,
+            "info",
+            "No embedded media descriptor was found in the public HTML; checking extractor page data.",
+        )?;
+
+        for (attempt_index, attempt) in attempts.iter().enumerate() {
+            if cancel_flag.load(Ordering::SeqCst) {
+                mark_canceled(app, state, job_id)?;
+                return Ok(Some(AttemptOutcome::Canceled));
+            }
+
+            update_phase(
+                app,
+                state,
+                job_id,
+                JobStatus::Resolving,
+                3.0,
+                &format!("Inspecting page data ({})", attempt.label),
+            )?;
+            match resolve_embedded_page_video_urls_from_dump(
+                yt_dlp,
+                &input.url,
+                &attempt.auth,
+            ) {
+                Ok(resolved) if !resolved.is_empty() => {
+                    targets = resolved;
+                    preferred_attempt = Some(attempt_index);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log(
+                        app,
+                        state,
+                        job_id,
+                        "warn",
+                        &format!(
+                            "Could not inspect extractor page data with {}: {error}",
+                            attempt.label
+                        ),
+                    )?;
+                }
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    let target_count = targets.len();
+    log(
+        app,
+        state,
+        job_id,
+        "info",
+        &format!("Resolved {target_count} embedded page video(s)."),
+    )?;
+
+    let mut attempt_order = (0..attempts.len()).collect::<Vec<_>>();
+    if let Some(preferred_attempt) = preferred_attempt {
+        attempt_order.rotate_left(preferred_attempt);
+    }
+
+    for (target_index, target_url) in targets.iter().enumerate() {
+        if cancel_flag.load(Ordering::SeqCst) {
+            mark_canceled(app, state, job_id)?;
+            return Ok(Some(AttemptOutcome::Canceled));
+        }
+
+        let mut last_error = None;
+        for (order_index, attempt_index) in attempt_order.iter().enumerate() {
+            let attempt = &attempts[*attempt_index];
+            let mut stream_input = input.clone();
+            stream_input.url = target_url.clone();
+            stream_input.auth = attempt.auth.clone();
+            stream_input.filename_template = page_video_filename_template(
+                input.filename_template.as_deref(),
+                &input.url,
+                target_index,
+                target_count,
+            );
+
+            let phase = format!(
+                "Downloading page video {}/{} ({})",
+                target_index + 1,
+                target_count,
+                attempt.label
+            );
+            match run_yt_dlp_attempt(
+                app,
+                state,
+                job_id,
+                &stream_input,
+                preset,
+                ffmpeg_location.clone(),
+                yt_dlp,
+                cancel_flag,
+                &phase,
+            )? {
+                AttemptOutcome::Succeeded => {
+                    last_error = None;
+                    break;
+                }
+                AttemptOutcome::Canceled => return Ok(Some(AttemptOutcome::Canceled)),
+                AttemptOutcome::Failed(error) => {
+                    let error = match run_yt_dlp_with_chrome_cookie_export(
+                        app,
+                        state,
+                        job_id,
+                        &stream_input,
+                        preset,
+                        ffmpeg_location.clone(),
+                        yt_dlp,
+                        cancel_flag,
+                        &attempt.auth,
+                        &error,
+                    )? {
+                        Some(AttemptOutcome::Succeeded) => {
+                            last_error = None;
+                            break;
+                        }
+                        Some(AttemptOutcome::Canceled) => {
+                            return Ok(Some(AttemptOutcome::Canceled));
+                        }
+                        Some(AttemptOutcome::Failed(retry_error)) => retry_error,
+                        None => error,
+                    };
+                    last_error = Some(error);
+
+                    if let Some(next_attempt_index) = attempt_order.get(order_index + 1) {
+                        log(
+                            app,
+                            state,
+                            job_id,
+                            "warn",
+                            &format!(
+                                "Page video {}/{} failed with {}; retrying with {}.",
+                                target_index + 1,
+                                target_count,
+                                attempt.label,
+                                attempts[*next_attempt_index].label
+                            ),
+                        )?;
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = last_error {
+            return Ok(Some(AttemptOutcome::Failed(format!(
+                "Page video {}/{} failed: {error}",
+                target_index + 1,
+                target_count
+            ))));
+        }
+    }
+
+    Ok(Some(AttemptOutcome::Succeeded))
+}
+
+fn page_video_filename_template(
+    requested: Option<&str>,
+    page_url: &str,
+    target_index: usize,
+    target_count: usize,
+) -> Option<String> {
+    let requested = requested.filter(|value| !value.trim().is_empty());
+    if target_count == 1 {
+        return requested
+            .map(str::to_string)
+            .or_else(|| page_media_filename(page_url).map(|filename| format!("{filename}.%(ext)s")));
+    }
+
+    let suffix = format!("-video-{:02}", target_index + 1);
+    if let Some(template) = requested {
+        if let Some(extension_index) = template.rfind(".%(ext)s") {
+            let mut indexed = template.to_string();
+            indexed.insert_str(extension_index, &suffix);
+            return Some(indexed);
+        }
+        return Some(format!("{template}{suffix}"));
+    }
+
+    page_media_filename(page_url)
+        .map(|filename| format!("{filename}{suffix}.%(ext)s"))
+        .or_else(|| Some(format!("page{suffix}.%(ext)s")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1655,8 +1828,14 @@ fn page_media_filename(input: &str) -> Option<String> {
 }
 
 fn resolve_embedded_page_video_url(page_url: &str) -> Result<Option<String>, String> {
+    Ok(resolve_embedded_page_video_urls(page_url)?
+        .into_iter()
+        .next())
+}
+
+fn resolve_embedded_page_video_urls(page_url: &str) -> Result<Vec<String>, String> {
     let html = http_get_page_text(page_url)?;
-    Ok(extract_embedded_page_video_url(&html, page_url))
+    Ok(extract_embedded_page_video_urls(&html, page_url))
 }
 
 fn resolve_page_video_target(yt_dlp: &Path, page_url: &str, auth: &AuthSource) -> Option<String> {
@@ -1675,6 +1854,18 @@ fn resolve_embedded_page_video_url_from_dump(
     page_url: &str,
     auth: &AuthSource,
 ) -> Result<Option<String>, String> {
+    Ok(
+        resolve_embedded_page_video_urls_from_dump(yt_dlp, page_url, auth)?
+            .into_iter()
+            .next(),
+    )
+}
+
+fn resolve_embedded_page_video_urls_from_dump(
+    yt_dlp: &Path,
+    page_url: &str,
+    auth: &AuthSource,
+) -> Result<Vec<String>, String> {
     let mut args = vec![
         "--dump-pages".to_string(),
         "--skip-download".to_string(),
@@ -1691,14 +1882,22 @@ fn resolve_embedded_page_video_url_from_dump(
         .output()
         .map_err(|error| format!("could not start page-data inspection: {error}"))?;
 
-    Ok(extract_embedded_page_video_url_from_dump(
+    Ok(extract_embedded_page_video_urls_from_dump(
         &output.stdout,
         page_url,
     ))
 }
 
+#[cfg(test)]
 fn extract_embedded_page_video_url_from_dump(stdout: &[u8], page_url: &str) -> Option<String> {
+    extract_embedded_page_video_urls_from_dump(stdout, page_url)
+        .into_iter()
+        .next()
+}
+
+fn extract_embedded_page_video_urls_from_dump(stdout: &[u8], page_url: &str) -> Vec<String> {
     let output = String::from_utf8_lossy(stdout);
+    let mut targets = Vec::new();
     for line in output.lines().map(str::trim) {
         if !looks_like_base64_dump_line(line) {
             continue;
@@ -1707,12 +1906,15 @@ fn extract_embedded_page_video_url_from_dump(stdout: &[u8], page_url: &str) -> O
             continue;
         };
         let page = String::from_utf8_lossy(&decoded);
-        if let Some(media_url) = extract_embedded_page_video_url(&page, page_url) {
-            return Some(media_url);
+        for target in extract_embedded_page_video_urls(&page, page_url) {
+            push_unique_page_target(&mut targets, target);
         }
     }
 
-    extract_embedded_page_video_url(&output, page_url)
+    for target in extract_embedded_page_video_urls(&output, page_url) {
+        push_unique_page_target(&mut targets, target);
+    }
+    targets
 }
 
 fn http_get_page_text(url: &str) -> Result<String, String> {
@@ -1749,54 +1951,107 @@ fn normalize_embedded_media_html(html: &str) -> String {
         .replace("&amp;", "&")
 }
 
+#[cfg(test)]
 fn extract_embedded_page_video_url(html: &str, page_url: &str) -> Option<String> {
+    extract_embedded_page_video_urls(html, page_url)
+        .into_iter()
+        .next()
+}
+
+#[derive(Debug, Clone)]
+struct PageVideoCandidate {
+    position: usize,
+    score: i32,
+    identity: String,
+    url: String,
+}
+
+fn extract_embedded_page_video_urls(html: &str, page_url: &str) -> Vec<String> {
     let normalized = normalize_embedded_media_html(html);
+    let mut candidates = Vec::<PageVideoCandidate>::new();
 
-    if let Some(url) = extract_squarespace_video_url(&normalized) {
-        return Some(url);
+    for (position, url) in extract_squarespace_video_urls(&normalized) {
+        push_page_candidate(&mut candidates, url, 1_300, position);
     }
-
-    let mut candidates = Vec::<(i32, String)>::new();
 
     let source_regex = Regex::new(
         r#"(?is)<(?:video|source)\b[^>]*\b(?:src|data-src|data-video-url|data-hls|data-dash|data-mp4)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
     )
-    .ok()?;
+    .expect("valid native video source regex");
+    let video_block_regex = Regex::new(r#"(?is)<video\b[^>]*>.*?</video\s*>"#)
+        .expect("valid video block regex");
+    let mut video_block_ranges = Vec::new();
+    for video_block in video_block_regex.find_iter(&normalized) {
+        video_block_ranges.push(video_block.start()..video_block.end());
+        let mut block_candidates = Vec::<PageVideoCandidate>::new();
+        for captures in source_regex.captures_iter(video_block.as_str()) {
+            let candidate =
+                (1..=3).find_map(|index| captures.get(index).map(|value| value.as_str()));
+            if let Some(url) =
+                candidate.and_then(|value| resolve_media_candidate(page_url, value))
+            {
+                let position = video_block.start()
+                    + captures.get(0).map_or(0, |capture| capture.start());
+                push_page_candidate(&mut block_candidates, url, 1_000, position);
+            }
+        }
+        if let Some(best) = block_candidates
+            .into_iter()
+            .max_by_key(|candidate| candidate.score)
+        {
+            push_page_candidate(&mut candidates, best.url, 1_000, video_block.start());
+        }
+    }
+
     for captures in source_regex.captures_iter(&normalized) {
+        let position = captures.get(0).map_or(0, |capture| capture.start());
+        if video_block_ranges
+            .iter()
+            .any(|range| range.contains(&position))
+        {
+            continue;
+        }
         let candidate = (1..=3).find_map(|index| captures.get(index).map(|value| value.as_str()));
         if let Some(url) = candidate.and_then(|value| resolve_media_candidate(page_url, value)) {
-            push_page_candidate(&mut candidates, url, 1_000);
+            push_page_candidate(&mut candidates, url, 1_000, position);
         }
     }
 
     let structured_regex = Regex::new(
         r#"(?i)\"(contentUrl|embedUrl|playerUrl|playbackUrl|manifestUrl|hlsUrl|dashUrl|file)\"\s*:\s*\"([^\"]+)\""#,
     )
-    .ok()?;
+    .expect("valid structured video descriptor regex");
     for captures in structured_regex.captures_iter(&normalized) {
-        let key = captures.get(1)?.as_str().to_ascii_lowercase();
-        let value = captures.get(2)?.as_str();
+        let Some(key) = captures.get(1).map(|value| value.as_str().to_ascii_lowercase()) else {
+            continue;
+        };
+        let Some(value) = captures.get(2).map(|value| value.as_str()) else {
+            continue;
+        };
+        let position = captures.get(0).map_or(0, |capture| capture.start());
         let candidate = resolve_media_candidate(page_url, value)
             .or_else(|| resolve_stream_descriptor_candidate(page_url, value, &key));
         if let Some(url) = candidate {
-            push_page_candidate(&mut candidates, url, 900);
+            push_page_candidate(&mut candidates, url, 900, position);
         } else if matches!(key.as_str(), "embedurl" | "playerurl") {
             if let Some(url) = resolve_embed_candidate(page_url, value) {
-                push_page_candidate(&mut candidates, url, 850);
+                push_page_candidate(&mut candidates, url, 850, position);
             }
         }
     }
 
-    let meta_regex = Regex::new(r#"(?is)<meta\b[^>]*>"#).ok()?;
+    let mut meta_candidates = Vec::<PageVideoCandidate>::new();
+    let meta_regex = Regex::new(r#"(?is)<meta\b[^>]*>"#).expect("valid meta tag regex");
     let meta_kind_regex = Regex::new(
         r#"(?is)\b(?:property|name)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
     )
-    .ok()?;
+    .expect("valid meta kind regex");
     let content_regex = Regex::new(
         r#"(?is)\bcontent\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
     )
-    .ok()?;
-    for tag in meta_regex.find_iter(&normalized).map(|value| value.as_str()) {
+    .expect("valid meta content regex");
+    for meta_match in meta_regex.find_iter(&normalized) {
+        let tag = meta_match.as_str();
         let kind = meta_kind_regex
             .captures(tag)
             .and_then(|captures| first_optional_capture(&captures))
@@ -1820,50 +2075,173 @@ fn extract_embedded_page_video_url(html: &str, page_url: &str) -> Option<String>
             continue;
         };
         if let Some(url) = resolve_media_candidate(page_url, value) {
-            push_page_candidate(&mut candidates, url, 950);
+            push_page_candidate(&mut meta_candidates, url, 950, meta_match.start());
         } else if let Some(url) = resolve_embed_candidate(page_url, value) {
-            push_page_candidate(&mut candidates, url, 800);
+            push_page_candidate(&mut meta_candidates, url, 800, meta_match.start());
         }
     }
 
     let iframe_regex = Regex::new(
         r#"(?is)<iframe\b[^>]*\b(?:src|data-src)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
     )
-    .ok()?;
+    .expect("valid iframe regex");
     for captures in iframe_regex.captures_iter(&normalized) {
         if let Some(url) = first_optional_capture(&captures)
             .and_then(|value| resolve_embed_candidate(page_url, value))
         {
-            push_page_candidate(&mut candidates, url, 800);
+            let position = captures.get(0).map_or(0, |capture| capture.start());
+            push_page_candidate(&mut candidates, url, 800, position);
+        }
+    }
+
+    if candidates.is_empty() {
+        candidates = meta_candidates;
+    } else {
+        for meta_candidate in meta_candidates {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.identity == meta_candidate.identity)
+            {
+                let base_score =
+                    meta_candidate.score - page_candidate_quality_score(&meta_candidate.url);
+                push_page_candidate(
+                    &mut candidates,
+                    meta_candidate.url,
+                    base_score,
+                    meta_candidate.position,
+                );
+            }
         }
     }
 
     let media_url_regex = Regex::new(
         r#"(?i)https?://[^\s\"'<>\\]+\.(?:m3u8|mpd|mp4|mov|m4v|webm|mkv)(?:\?[^\s\"'<>\\]*)?"#,
     )
-    .ok()?;
-    for value in media_url_regex.find_iter(&normalized) {
-        if let Some(url) = resolve_media_candidate(page_url, value.as_str()) {
-            push_page_candidate(&mut candidates, url, 400);
+    .expect("valid media URL regex");
+    if candidates.is_empty() {
+        for value in media_url_regex.find_iter(&normalized) {
+            if video_block_ranges
+                .iter()
+                .any(|range| range.contains(&value.start()))
+            {
+                continue;
+            }
+            if let Some(url) = resolve_media_candidate(page_url, value.as_str()) {
+                push_page_candidate(&mut candidates, url, 400, value.start());
+            }
         }
     }
 
+    candidates.sort_by(|left, right| {
+        left.position
+            .cmp(&right.position)
+            .then_with(|| right.score.cmp(&left.score))
+            .then_with(|| left.url.cmp(&right.url))
+    });
     candidates
         .into_iter()
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, url)| url)
+        .map(|candidate| candidate.url)
+        .collect()
 }
 
 fn first_optional_capture<'a>(captures: &regex::Captures<'a>) -> Option<&'a str> {
     (1..captures.len()).find_map(|index| captures.get(index).map(|value| value.as_str()))
 }
 
-fn push_page_candidate(candidates: &mut Vec<(i32, String)>, url: String, base_score: i32) {
-    if candidates.iter().any(|(_, existing)| existing == &url) {
+fn push_page_candidate(
+    candidates: &mut Vec<PageVideoCandidate>,
+    url: String,
+    base_score: i32,
+    position: usize,
+) {
+    let identity = page_video_identity(&url);
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|candidate| candidate.identity == identity)
+    {
+        existing.position = existing.position.min(position);
+        let score = base_score + page_candidate_quality_score(&url);
+        if score > existing.score {
+            existing.score = score;
+            existing.url = url;
+        }
         return;
     }
     let score = base_score + page_candidate_quality_score(&url);
-    candidates.push((score, url));
+    candidates.push(PageVideoCandidate {
+        position,
+        score,
+        identity,
+        url,
+    });
+}
+
+fn push_unique_page_target(targets: &mut Vec<String>, url: String) {
+    let identity = page_video_identity(&url);
+    if !targets
+        .iter()
+        .any(|target| page_video_identity(target) == identity)
+    {
+        targets.push(url);
+    }
+}
+
+fn page_video_identity(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return url.to_ascii_lowercase();
+    };
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let mut segments = parsed
+        .path_segments()
+        .map(|segments| segments.map(str::to_ascii_lowercase).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let mut is_file_media = false;
+    if let Some(last) = segments.last_mut() {
+        is_file_media = ["m3u8", "mpd", "mp4", "mov", "m4v", "webm", "mkv"]
+            .iter()
+            .any(|extension| last.ends_with(&format!(".{extension}")));
+        let stem = last
+            .rsplit_once('.')
+            .map_or(last.as_str(), |(stem, _)| stem)
+            .to_string();
+        if matches!(stem.as_str(), "master" | "manifest" | "playlist" | "index") {
+            segments.pop();
+        } else {
+            let quality_suffix = Regex::new(
+                r#"(?i)(?:[-_.](?:2160|1440|1080|720|540|480|360|240)(?:p)?|[-_.](?:uhd|fhd|hd|sd))$"#,
+            )
+            .expect("valid quality suffix regex");
+            *last = quality_suffix.replace(&stem, "").to_string();
+        }
+    }
+
+    let mut identity = format!("{host}/{}", segments.join("/"));
+    if !is_file_media {
+        let stable_query = parsed
+            .query_pairs()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "token"
+                        | "sig"
+                        | "signature"
+                        | "expires"
+                        | "expiry"
+                        | "policy"
+                        | "key-pair-id"
+                        | "e"
+                        | "t"
+                )
+            })
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>();
+        if !stable_query.is_empty() {
+            identity.push('?');
+            identity.push_str(&stable_query.join("&"));
+        }
+    }
+    identity
 }
 
 fn page_candidate_quality_score(url: &str) -> i32 {
@@ -1926,25 +2304,41 @@ fn resolve_stream_descriptor_candidate(
     looks_like_stream.then(|| resolved.to_string())
 }
 
-fn extract_squarespace_video_url(normalized_html: &str) -> Option<String> {
-    let regex = Regex::new(r#""alexandriaUrl"\s*:\s*"([^"]+)""#).ok()?;
-    let base_url = regex.captures(normalized_html)?.get(1)?.as_str();
-    if !base_url.contains("{variant}") {
-        return None;
+fn extract_squarespace_video_urls(normalized_html: &str) -> Vec<(usize, String)> {
+    let regex = Regex::new(r#""alexandriaUrl"\s*:\s*"([^"]+)""#)
+        .expect("valid Squarespace video regex");
+    let mut targets = Vec::new();
+    for captures in regex.captures_iter(normalized_html) {
+        let Some(base_url) = captures.get(1).map(|capture| capture.as_str()) else {
+            continue;
+        };
+        if !base_url.contains("{variant}") {
+            continue;
+        }
+
+        let playlist_url = base_url.replace("{variant}", "playlist.m3u8");
+        let Ok(parsed) = Url::parse(&playlist_url) else {
+            continue;
+        };
+        let host = parsed
+            .host_str()
+            .unwrap_or_default()
+            .trim_start_matches("www.")
+            .to_ascii_lowercase();
+        if matches!(parsed.scheme(), "http" | "https")
+            && (host == "squarespace-cdn.com" || host.ends_with(".squarespace-cdn.com"))
+            && parsed.path().ends_with("/playlist.m3u8")
+        {
+            let position = captures.get(0).map_or(0, |capture| capture.start());
+            if !targets
+                .iter()
+                .any(|(_, existing)| existing == &playlist_url)
+            {
+                targets.push((position, playlist_url));
+            }
+        }
     }
-
-    let playlist_url = base_url.replace("{variant}", "playlist.m3u8");
-    let parsed = Url::parse(&playlist_url).ok()?;
-    let host = parsed
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-
-    (matches!(parsed.scheme(), "http" | "https")
-        && (host == "squarespace-cdn.com" || host.ends_with(".squarespace-cdn.com"))
-        && parsed.path().ends_with("/playlist.m3u8"))
-    .then_some(playlist_url)
+    targets
 }
 
 fn resolve_media_candidate(page_url: &str, candidate: &str) -> Option<String> {
@@ -2784,6 +3178,108 @@ mod tests {
     }
 
     #[test]
+    fn extracts_each_native_video_but_collapses_its_quality_variants() {
+        let html = r#"
+            <video>
+              <source src="https://cdn.example/launch-480.mp4">
+              <source src="https://cdn.example/launch-1080.mp4">
+            </video>
+            <video src="https://cdn.example/interview-720.mp4">
+              <source src="https://cdn.example/interview-1440.mp4">
+            </video>
+        "#;
+
+        assert_eq!(
+            extract_embedded_page_video_urls(html, "https://portfolio.example/work"),
+            vec![
+                "https://cdn.example/launch-1080.mp4",
+                "https://cdn.example/interview-1440.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_multiple_squarespace_video_descriptors_in_page_order() {
+        let html = r#"
+            {"alexandriaUrl":"https://video.squarespace-cdn.com/content/v1/site/first/{variant}"}
+            {"alexandriaUrl":"https://video.squarespace-cdn.com/content/v1/site/second/{variant}"}
+        "#;
+
+        assert_eq!(
+            extract_embedded_page_video_urls(html, "https://portfolio.example/work"),
+            vec![
+                "https://video.squarespace-cdn.com/content/v1/site/first/playlist.m3u8",
+                "https://video.squarespace-cdn.com/content/v1/site/second/playlist.m3u8",
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_player_urls_with_different_stable_query_ids_separate() {
+        let html = r#"
+            <iframe src="https://player.example/embed/video?id=first"></iframe>
+            <iframe src="https://player.example/embed/video?id=second"></iframe>
+        "#;
+
+        assert_eq!(
+            extract_embedded_page_video_urls(html, "https://portfolio.example/work"),
+            vec![
+                "https://player.example/embed/video?id=first",
+                "https://player.example/embed/video?id=second",
+            ]
+        );
+    }
+
+    #[test]
+    fn treats_open_graph_video_as_fallback_when_explicit_players_exist() {
+        let html = r#"
+            <meta property="og:video" content="https://cdn.example/social-preview.mp4">
+            <iframe src="https://player.example/embed/primary"></iframe>
+            <iframe src="https://player.example/embed/secondary"></iframe>
+        "#;
+
+        assert_eq!(
+            extract_embedded_page_video_urls(html, "https://portfolio.example/work"),
+            vec![
+                "https://player.example/embed/primary",
+                "https://player.example/embed/secondary",
+            ]
+        );
+    }
+
+    #[test]
+    fn collapses_unlabelled_raw_quality_variants_when_they_are_the_only_targets() {
+        let html = r#"
+            "https://cdn.example/feature-480.mp4"
+            "https://cdn.example/feature-1080.mp4"
+        "#;
+
+        assert_eq!(
+            extract_embedded_page_video_urls(html, "https://portfolio.example/work"),
+            vec!["https://cdn.example/feature-1080.mp4"]
+        );
+    }
+
+    #[test]
+    fn indexes_page_video_filenames_without_overwriting_siblings() {
+        assert_eq!(
+            page_video_filename_template(
+                None,
+                "https://portfolio.example/case-study",
+                1,
+                3
+            )
+            .as_deref(),
+            Some("case-study-video-02.%(ext)s")
+        );
+        assert_eq!(
+            page_video_filename_template(Some("custom.%(ext)s"), "https://example.com", 0, 2)
+                .as_deref(),
+            Some("custom-video-01.%(ext)s")
+        );
+    }
+
+    #[test]
     fn extracts_embedded_players_from_base64_page_dumps() {
         let html = format!(
             r#"<iframe src="https://player.example/embed/456" data-page-context="{}"></iframe>"#,
@@ -2798,6 +3294,36 @@ mod tests {
             )
             .as_deref(),
             Some("https://player.example/embed/456")
+        );
+    }
+
+    #[test]
+    fn combines_distinct_targets_from_multiple_base64_page_dumps() {
+        let first = BASE64_STANDARD.encode(
+            format!(
+                r#"<iframe src="https://player.example/embed/first"></iframe><!-- {} -->"#,
+                "x".repeat(120)
+            )
+            .as_bytes(),
+        );
+        let second = BASE64_STANDARD.encode(
+            format!(
+                r#"<iframe src="https://player.example/embed/second"></iframe><!-- {} -->"#,
+                "y".repeat(120)
+            )
+            .as_bytes(),
+        );
+        let dump = format!("{first}\n{second}");
+
+        assert_eq!(
+            extract_embedded_page_video_urls_from_dump(
+                dump.as_bytes(),
+                "https://portfolio.example/work"
+            ),
+            vec![
+                "https://player.example/embed/first",
+                "https://player.example/embed/second",
+            ]
         );
     }
 

@@ -14,7 +14,7 @@ export const presets: Preset[] = [
     siteKinds: ["generic"],
     label: "Page Video",
     description:
-      "Resolve page metadata, players, streams, or native video, then use standard extraction.",
+      "Resolve every distinct video from page metadata, players, streams, or native video.",
     outputKind: "video",
     pipeline: "http_resolve_then_download",
     auth: "optional",

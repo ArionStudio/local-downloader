@@ -8,7 +8,7 @@ pub fn all_presets() -> Vec<Preset> {
             "generic-page-video-highest",
             &[SiteKind::Generic],
             "Page Video",
-            "Resolve page metadata, players, streams, or native video, then use standard extraction.",
+            "Resolve every distinct video from page metadata, players, streams, or native video.",
             OutputKind::Video,
             Pipeline::HttpResolveThenDownload,
             AuthRequirement::Optional,
