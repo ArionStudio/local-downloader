@@ -136,8 +136,6 @@ const siteLabels: Record<SiteKind, string> = {
   youtube: "YouTube",
   x: "X",
   vimeo: "Vimeo",
-  sawhorse: "Sawhorse",
-  gamefam: "Gamefam",
   direct_hls: "HLS",
   direct_file: "File",
 }

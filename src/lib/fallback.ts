@@ -12,15 +12,16 @@ export const presets: Preset[] = [
   {
     id: "generic-page-video-highest",
     siteKinds: ["generic"],
-    label: "Generic Page Video",
-    description: "Find the highest quality video available on a standard page.",
+    label: "Page Video",
+    description:
+      "Resolve page metadata, players, streams, or native video, then use standard extraction.",
     outputKind: "video",
-    pipeline: "yt_dlp",
+    pipeline: "http_resolve_then_download",
     auth: "optional",
   },
   {
     id: "generic-direct-stream-highest",
-    siteKinds: ["generic", "direct_hls", "sawhorse"],
+    siteKinds: ["generic", "direct_hls"],
     label: "Direct Stream Video",
     description: "Save the highest quality HLS or DASH stream as mp4.",
     outputKind: "video",
@@ -123,25 +124,6 @@ export const presets: Preset[] = [
     pipeline: "yt_dlp",
     auth: "optional",
   },
-  {
-    id: "sawhorse-portfolio-video-highest",
-    siteKinds: ["sawhorse"],
-    label: "Sawhorse Portfolio Video",
-    description: "Resolve embedded portfolio video at the highest quality.",
-    outputKind: "video",
-    pipeline: "http_resolve_then_download",
-    auth: "optional",
-  },
-  {
-    id: "gamefam-case-study-video-highest",
-    siteKinds: ["gamefam"],
-    label: "Gamefam Case Study Video",
-    description:
-      "Resolve the embedded Squarespace stream and save the highest quality video.",
-    outputKind: "video",
-    pipeline: "http_resolve_then_download",
-    auth: "none",
-  },
 ]
 
 export function detectSite(input: string): SiteKind {
@@ -158,9 +140,6 @@ export function detectSite(input: string): SiteKind {
     if (host === "youtu.be" || host.endsWith("youtube.com")) return "youtube"
     if (host === "x.com" || host === "twitter.com") return "x"
     if (host.endsWith("vimeo.com")) return "vimeo"
-    if (host.endsWith("sawhorsela.com")) return "sawhorse"
-    if (host === "gamefam.com") return "gamefam"
-
     return "generic"
   } catch {
     return "generic"
@@ -173,6 +152,15 @@ export function analyzeLocally(input: string): AnalyzeResult {
   let matching = presets.filter((preset) =>
     preset.siteKinds.includes(siteKind)
   )
+  if (
+    matching.length > 0 &&
+    !["generic", "direct_hls", "direct_file"].includes(siteKind)
+  ) {
+    const pageFallback = presets.find(
+      (preset) => preset.id === "generic-page-video-highest"
+    )
+    if (pageFallback) matching = [...matching, pageFallback]
+  }
   if (siteKind === "youtube") {
     if (looksLikeYouTubeChannelUrl(normalizedUrl)) {
       matching = [

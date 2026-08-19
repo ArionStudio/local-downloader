@@ -112,14 +112,6 @@ pub fn detect_site(input: &str) -> SiteKind {
         return SiteKind::Vimeo;
     }
 
-    if host.ends_with("sawhorsela.com") {
-        return SiteKind::Sawhorse;
-    }
-
-    if host == "gamefam.com" {
-        return SiteKind::Gamefam;
-    }
-
     SiteKind::Generic
 }
 
@@ -225,14 +217,18 @@ mod tests {
     }
 
     #[test]
-    fn detects_gamefam_case_study_urls() {
+    fn treats_embedded_video_pages_as_generic() {
         assert_eq!(
             detect_site("https://gamefam.com/case-study-old-navy"),
-            SiteKind::Gamefam
+            SiteKind::Generic
         );
         assert_eq!(
             detect_site("https://www.gamefam.com/case-study-coldplay"),
-            SiteKind::Gamefam
+            SiteKind::Generic
+        );
+        assert_eq!(
+            detect_site("https://sawhorsela.com/portfolio/example/"),
+            SiteKind::Generic
         );
     }
 }

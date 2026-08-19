@@ -7,15 +7,15 @@ pub fn all_presets() -> Vec<Preset> {
         preset(
             "generic-page-video-highest",
             &[SiteKind::Generic],
-            "Generic Page Video",
-            "Find the highest quality video available on a standard page.",
+            "Page Video",
+            "Resolve page metadata, players, streams, or native video, then use standard extraction.",
             OutputKind::Video,
-            Pipeline::YtDlp,
+            Pipeline::HttpResolveThenDownload,
             AuthRequirement::Optional,
         ),
         preset(
             "generic-direct-stream-highest",
-            &[SiteKind::Generic, SiteKind::DirectHls, SiteKind::Sawhorse],
+            &[SiteKind::Generic, SiteKind::DirectHls],
             "Direct Stream Video",
             "Save the highest quality HLS or DASH stream as mp4.",
             OutputKind::Video,
@@ -112,24 +112,6 @@ pub fn all_presets() -> Vec<Preset> {
             Pipeline::YtDlp,
             AuthRequirement::Optional,
         ),
-        preset(
-            "sawhorse-portfolio-video-highest",
-            &[SiteKind::Sawhorse],
-            "Sawhorse Portfolio Video",
-            "Resolve embedded portfolio video at the highest quality.",
-            OutputKind::Video,
-            Pipeline::HttpResolveThenDownload,
-            AuthRequirement::Optional,
-        ),
-        preset(
-            "gamefam-case-study-video-highest",
-            &[SiteKind::Gamefam],
-            "Gamefam Case Study Video",
-            "Resolve the embedded Squarespace stream and save the highest quality video.",
-            OutputKind::Video,
-            Pipeline::HttpResolveThenDownload,
-            AuthRequirement::None,
-        ),
     ]
 }
 
@@ -149,6 +131,10 @@ pub fn matching_presets(site: &SiteKind) -> Vec<Preset> {
                     .any(|kind| kind == &SiteKind::Generic)
             })
             .collect();
+    } else if !matches!(site, SiteKind::Generic | SiteKind::DirectHls | SiteKind::DirectFile) {
+        if let Some(page_video) = find_preset("generic-page-video-highest") {
+            matched.push(page_video);
+        }
     }
 
     matched
@@ -228,9 +214,10 @@ mod tests {
     fn matches_crunchyroll_preset() {
         let presets = matching_presets(&SiteKind::Crunchyroll);
 
-        assert_eq!(presets.len(), 1);
+        assert_eq!(presets.len(), 2);
         assert_eq!(presets[0].id, "crunchyroll-video-highest");
         assert_eq!(presets[0].auth, AuthRequirement::Required);
+        assert_eq!(presets[1].id, "generic-page-video-highest");
     }
 
     #[test]
@@ -249,11 +236,24 @@ mod tests {
     }
 
     #[test]
-    fn matches_gamefam_preset_without_auth() {
-        let presets = matching_presets(&SiteKind::Gamefam);
+    fn generic_pages_use_embedded_media_resolution_with_optional_auth() {
+        let presets = matching_presets(&SiteKind::Generic);
 
-        assert_eq!(presets.len(), 1);
-        assert_eq!(presets[0].id, "gamefam-case-study-video-highest");
-        assert_eq!(presets[0].auth, AuthRequirement::None);
+        assert_eq!(presets[0].id, "generic-page-video-highest");
+        assert!(matches!(
+            presets[0].pipeline,
+            Pipeline::HttpResolveThenDownload
+        ));
+        assert_eq!(presets[0].auth, AuthRequirement::Optional);
+        assert!(presets.iter().all(|preset| !preset.id.contains("gamefam")));
+        assert!(presets.iter().all(|preset| !preset.id.contains("sawhorse")));
+    }
+
+    #[test]
+    fn known_video_sites_keep_their_specialized_preset_and_offer_page_fallback() {
+        let presets = matching_presets(&SiteKind::Vimeo);
+
+        assert_eq!(presets[0].id, "vimeo-video-highest");
+        assert_eq!(presets[1].id, "generic-page-video-highest");
     }
 }

@@ -16,8 +16,6 @@ pub enum SiteKind {
     Youtube,
     X,
     Vimeo,
-    Sawhorse,
-    Gamefam,
     DirectHls,
     DirectFile,
 }
@@ -32,8 +30,6 @@ impl SiteKind {
             SiteKind::Youtube => "youtube",
             SiteKind::X => "x",
             SiteKind::Vimeo => "vimeo",
-            SiteKind::Sawhorse => "sawhorse",
-            SiteKind::Gamefam => "gamefam",
             SiteKind::DirectHls => "direct_hls",
             SiteKind::DirectFile => "direct_file",
         }
@@ -47,8 +43,10 @@ impl SiteKind {
             "youtube" => SiteKind::Youtube,
             "x" => SiteKind::X,
             "vimeo" => SiteKind::Vimeo,
-            "sawhorse" => SiteKind::Sawhorse,
-            "gamefam" => SiteKind::Gamefam,
+            // Compatibility with jobs saved before portfolio pages became generic pages.
+            "sawhorse" => SiteKind::Generic,
+            // Compatibility with jobs saved before Gamefam pages became generic pages.
+            "gamefam" => SiteKind::Generic,
             "direct_hls" => SiteKind::DirectHls,
             "direct_file" => SiteKind::DirectFile,
             _ => SiteKind::Generic,

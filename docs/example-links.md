@@ -23,7 +23,7 @@ https://vimeo.com/1035144975?fl=pl&fe=cm
 https://vimeo.com/1103400485?fl=pl&fe=cm
 https://vimeo.com/1103355260?fl=pl&fe=cm
 
-## Sawhorse Portfolio Pages
+## Embedded Player Pages (Vimeo iframe)
 
 https://sawhorsela.com/portfolio/how-to-train-your-dragon-x-roblox/
 https://sawhorsela.com/portfolio/wicked-x-roblox-shiz-university/
@@ -46,7 +46,7 @@ https://sawhorsela.com/portfolio/sinners-x-fortnite-survive-the-night/
 https://sawhorsela.com/portfolio/ewqrtgfyhuvkiy6-the-conjuring-last-rites-x-fortnite-trailer/
 https://sawhorsela.com/portfolio/shelter-x-fortnite/
 
-## Gamefam Case Studies
+## Embedded Page Videos (Squarespace)
 
 https://gamefam.com/case-study-old-navy
 https://gamefam.com/case-study-nickmas

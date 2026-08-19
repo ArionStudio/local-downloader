@@ -33,9 +33,9 @@ pnpm tauri build --no-bundle
 
 GitHub releases include ad-hoc-signed builds for Apple Silicon and Intel Macs. They do not require an Apple Developer membership, but users must approve the app under **System Settings → Privacy & Security → Open Anyway** on first launch. See [docs/macos-signing.md](docs/macos-signing.md) for release and installation details.
 
-Presets describe page shapes such as LinkedIn post, LinkedIn article, Reddit post, Reddit multiple media, Crunchyroll video, or Gamefam case study. All presets target the highest quality video available.
+Presets describe page shapes such as a general page video, LinkedIn post, LinkedIn article, Reddit post, Reddit multiple media, or Crunchyroll video. All presets target the highest quality video available.
 
-Gamefam case-study support resolves the native Squarespace video metadata in the page HTML, then passes its HLS playlist to `yt-dlp` for the final MP4 download.
+The default **Page Video** preset combines the reusable behavior from the specialized downloaders: native HTML video, structured video metadata, embedded players, direct media, HLS/DASH manifests, escaped page data, extractor page dumps, optional cookies, highest-quality selection, and standard `yt-dlp` extraction. Provider-specific API workflows remain separate, but every regular video site also offers **Page Video** as a fallback.
 
 YouTube channel links (`/@handle`, `/channel/...`, `/c/...`, and `/user/...`) also offer a **YouTube Channel Catalogue** preset. Paste one or several channel links into the main input; they are grouped into one result and one **Export all channels** action. Before starting, enter an export name and choose **All**, **Videos only**, or **Shorts only**; the combined catalogue is written to `youtube_export/<export name>/youtube_videos.json` and `youtube_export/<export name>/youtube_videos.xlsx`. Each exported item includes a `content_type` value of `video` or `short`, and Shorts use their `youtube.com/shorts/...` link. A completed export with the same name is never overwritten. The export reads the selected Videos and/or Shorts tabs, excludes livestream tabs, and checkpoints completed video metadata so interrupted runs can resume.
 

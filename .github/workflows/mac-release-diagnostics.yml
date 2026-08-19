@@ -6,7 +6,7 @@ on:
       tag:
         description: "Release tag to inspect"
         required: true
-        default: "app-v0.1.16"
+        default: "app-v0.1.17"
 
 jobs:
   diagnose:
