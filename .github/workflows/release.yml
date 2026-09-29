@@ -7,6 +7,12 @@ on:
       - "app-v*"
 
 jobs:
+  cli:
+    name: Standalone CLI
+    uses: ./.github/workflows/cli.yml
+    permissions:
+      contents: read
+
   release:
     name: ${{ matrix.name }}
     permissions:
@@ -134,17 +140,41 @@ jobs:
 
   publish:
     name: Publish verified release
-    needs: release
+    needs: [release, cli]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: cli-dist
+          merge-multiple: true
+
+      - name: Verify and upload standalone CLI assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' package.json)"
+          tag="app-v$version"
+          cd cli-dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            extension=tar.gz
+            if [[ "$target" == *windows* ]]; then extension=zip; fi
+            sha256sum -c "downloader-cli-$version-$target.$extension.sha256"
+          done
+          cat ./*.sha256 > SHA256SUMS
+          gh release upload "$tag" ./*.tar.gz ./*.zip ./*.sha256 SHA256SUMS \
+            ../docs/cli.md ../examples/adminhub-downloader.mjs --clobber
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="app-v$(jq -r '.version' package.json)"
-          gh release edit "$tag" --draft=false --latest
+          version="$(jq -r '.version' package.json)"
+          tag="app-v$version"
+          gh release edit "$tag" --notes-file "docs/releases/$version.md" --draft=false --latest

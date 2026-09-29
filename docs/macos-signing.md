@@ -17,6 +17,8 @@ It verifies that each app bundle:
 - contains the expected CPU architecture;
 - was packaged successfully as a DMG and updater archive.
 
+Releases also include standalone `downloader-cli` archives for Apple Silicon and Intel. Each CLI is built and tested on a runner with the matching CPU, checked for Homebrew library dependencies, ad-hoc signed, extracted from its archive, and executed again before publication. CLI archives include their integration guide and Node adapter. See [CLI installation](cli.md#macos-and-linux) for download commands and first-run approval.
+
 All platform artifacts remain in a draft GitHub release until every build and integrity check succeeds. The Tauri updater artifacts remain cryptographically signed with the existing, non-Apple updater secrets:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
@@ -37,14 +39,14 @@ Do not tell users to disable Gatekeeper globally or run `xattr -cr` as the norma
 
 ## Publish a Release
 
-Increment the version in both `package.json` and `src-tauri/tauri.conf.json`, commit it, and push the matching tag. For example, version `0.1.15` uses:
+Increment the version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the downloader entry in `src-tauri/Cargo.lock`. Add release notes at `docs/releases/<version>.md`, update the pinned download links in `docs/cli.md`, commit, and push the matching tag. For example, version `0.1.19` uses:
 
 ```bash
-git tag app-v0.1.15
-git push origin app-v0.1.15
+git tag app-v0.1.19
+git push origin app-v0.1.19
 ```
 
-Only after every platform succeeds does the workflow publish the draft release.
+Only after every desktop and CLI platform succeeds does the workflow upload all CLI archives, checksums, the guide, and adapter, then publish the draft release with the version's release notes.
 
 For an independent package check, run the **mac release diagnostics** workflow and enter the new tag. It automatically downloads and validates every Mac DMG and updater tarball. This validates packaging and the ad-hoc signature; it does not and cannot prove Gatekeeper acceptance.
 

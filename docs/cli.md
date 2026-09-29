@@ -2,26 +2,98 @@
 
 `downloader-cli` runs the desktop app's download engine without a window, display server, or WebKit dependency. It supports the same presets, cookie handling, stream selection, trimming, channel catalogues, tool installers, and XRBAZAAR preparation. Every operation returns JSON; downloads can stream job events as newline-delimited JSON.
 
-## Build and install
+## Download and install
 
-The CLI is currently distributed as source on `t3code/improve-user-interface`, not as a standalone GitHub release asset. These shell commands are for Linux/macOS; Linux builds and runtime behavior have been verified. Use a current stable Rust toolchain and a native C/C++ compiler. Linux also needs `pkg-config` and D-Bus development headers (Debian/Ubuntu packages: `build-essential`, `pkg-config`, `libdbus-1-dev`). Node, pnpm, GTK, and WebKit are not needed to build the headless binary.
+Download a standalone binary from [GitHub Releases](https://github.com/ArionStudio/local-downloader/releases/latest). No Rust, Node, source checkout, or desktop app is required. The following links and commands pin **0.1.19**, so your agent can reproduce its installation.
+
+| Machine | Release archive |
+| --- | --- |
+| macOS Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.19/downloader-cli-0.1.19-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [x86_64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.19/downloader-cli-0.1.19-x86_64-apple-darwin.tar.gz) |
+| Linux x64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.19/downloader-cli-0.1.19-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.19/downloader-cli-0.1.19-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [x86_64-pc-windows-msvc.zip](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.19/downloader-cli-0.1.19-x86_64-pc-windows-msvc.zip) |
+
+Use macOS 14 or newer, Linux with glibc 2.35 or newer, or Windows 10/11 x64. Linux needs the D-Bus runtime library, typically already installed on desktops (`libdbus-1-3` on Debian/Ubuntu). Alpine/musl and Windows ARM64 native binaries are not included. macOS builds are native for each CPU; Apple Silicon does not need Rosetta.
+
+### macOS and Linux
+
+Run this in Terminal. It detects your OS and CPU, downloads the matching archive, verifies its checksum, and installs into your user account without sudo:
 
 ```bash
-git clone --branch t3code/improve-user-interface --single-branch \
-  https://github.com/ArionStudio/local-downloader.git
-cd local-downloader
-cargo build --release --locked --manifest-path src-tauri/Cargo.toml \
-  --no-default-features --bin downloader-cli
-mkdir -p "$HOME/.local/bin"
-install -m755 src-tauri/target/release/downloader-cli ~/.local/bin/downloader-cli
+(
+  set -eu
+  version=0.1.19
+  case "$(uname -s)" in
+    Darwin) platform=apple-darwin ;;
+    Linux) platform=unknown-linux-gnu ;;
+    *) echo 'Use the Windows instructions below.' >&2; exit 1 ;;
+  esac
+  # Detect Apple Silicon even if Terminal itself is running under Rosetta.
+  machine="$(uname -m)"
+  if [ "$platform" = apple-darwin ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
+    machine=arm64
+  fi
+  case "$machine" in
+    arm64|aarch64) architecture=aarch64 ;;
+    x86_64|amd64) architecture=x86_64 ;;
+    *) echo "Unsupported CPU: $machine" >&2; exit 1 ;;
+  esac
+  asset="downloader-cli-$version-$architecture-$platform.tar.gz"
+  base="https://github.com/ArionStudio/local-downloader/releases/download/app-v$version"
+  temporary="$(mktemp -d)"
+  cd "$temporary"
+  curl --fail --location --retry 3 --output "$asset" "$base/$asset"
+  curl --fail --location --retry 3 --output "$asset.sha256" "$base/$asset.sha256"
+  if [ "$platform" = apple-darwin ]; then
+    shasum -a 256 -c "$asset.sha256"
+  else
+    sha256sum -c "$asset.sha256"
+  fi
+  tar -xzf "$asset"
+  mkdir -p "$HOME/.local/bin"
+  install -m 755 downloader-cli "$HOME/.local/bin/downloader-cli"
+  "$HOME/.local/bin/downloader-cli" --version
+  echo "Guide and adapter extracted to: $temporary"
+)
 export PATH="$HOME/.local/bin:$PATH"
-downloader-cli --version
-git rev-parse HEAD
+downloader-cli tools install all
 ```
 
-Record the commit printed by `git rev-parse HEAD` and pin that revision in your integration. If you already cloned the repository, check out the feature branch and build from its root. For an agent launched by a service, configure its PATH or pass the absolute executable path; interactive shell PATH changes may not reach the service.
+Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` on macOS or your Linux shell configuration to keep it for later terminals. Agents launched as services should use the absolute executable path or configure their own PATH.
 
-Linux uses D-Bus and the OS secret service for browser-cookie decryption and API keys. Runtime downloads require yt-dlp; merging and XRBAZAAR preparation require FFmpeg and ffprobe. Browser cookies must be accessible to the account running the CLI. An SSH session may need access to that account's unlocked credential vault.
+Mac binaries are ad-hoc signed, not Apple notarized. If a browser-downloaded executable is blocked, try running it, then allow that specific executable under **System Settings → Privacy & Security → Open Anyway** and retry. Do not disable Gatekeeper globally. Browser-cookie access may separately request Keychain permission; run under the account that owns the browser profile.
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$version = '0.1.19'
+$asset = "downloader-cli-$version-x86_64-pc-windows-msvc.zip"
+$base = "https://github.com/ArionStudio/local-downloader/releases/download/app-v$version"
+$temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
+New-Item -ItemType Directory -Path $temporary | Out-Null
+$archive = Join-Path $temporary $asset
+Invoke-WebRequest "$base/$asset" -OutFile $archive
+Invoke-WebRequest "$base/$asset.sha256" -OutFile "$archive.sha256"
+$expected = ((Get-Content "$archive.sha256" -Raw).Trim() -split '\s+')[0]
+if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+    throw 'Download checksum mismatch'
+}
+$destination = Join-Path $env:LOCALAPPDATA 'Programs\downloader-cli'
+Expand-Archive $archive -DestinationPath $destination -Force
+$env:Path = "$destination;$env:Path"
+downloader-cli --version
+downloader-cli tools install all
+```
+
+The executable is `%LOCALAPPDATA%\Programs\downloader-cli\downloader-cli.exe`. Configure that absolute path in your agent, or add its directory to your user PATH in Windows Environment Variables. The executable is not Authenticode signed; Windows may show a publisher warning. The ZIP also contains `docs\cli.md` and `examples\adminhub-downloader.mjs`.
+
+### Download tools and check setup
+
+Runtime downloads require yt-dlp; merging and XRBAZAAR preparation require FFmpeg and ffprobe. `tools install all` downloads and verifies the correct native versions into CLI-managed storage. Existing tools on PATH are also supported. Homebrew, Python, and a separate FFmpeg installation are not required for this setup.
 
 ```bash
 downloader-cli tools platform
@@ -29,13 +101,15 @@ downloader-cli tools status
 downloader-cli tools install all
 ```
 
-`ffmpeg` installation includes ffprobe. Installers select and validate binaries for the executing machine's OS and architecture.
+`ffmpeg` installation includes ffprobe. Installers select and validate binaries for the executing machine's OS and architecture. macOS uses [Martin Riedl's FFmpeg builds](https://ffmpeg.martin-riedl.de/), Linux/Windows use [BtbN builds](https://github.com/BtbN/FFmpeg-Builds), and yt-dlp comes from its [upstream releases](https://github.com/yt-dlp/yt-dlp/releases). Downloads are checksum-verified before execution.
+
+Browser cookies must be accessible to the OS account running the CLI. An SSH session or background agent may need access to that account's unlocked Keychain or Linux Secret Service. Cookie export does not transfer decryption keys between accounts or systems.
 
 ## Agent setup checklist
 
 Give your agent this guide and the following task:
 
-> Integrate `downloader-cli` from this repository's `t3code/improve-user-interface` branch. Build the headless binary using the instructions above and pin the source commit. Discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client.
+> Integrate `downloader-cli` using the standalone binary from this repository's GitHub release `app-v0.1.19`. Detect the machine's OS and CPU, download the matching CLI archive, verify its SHA-256 checksum, and install the executable. Do not build from source. Run `tools install all`, then discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client.
 
 1. Run `--version`, `tools platform`, and `tools status`; install missing tools with `tools install all`.
 2. Choose a persistent private CLI data directory with `DOWNLOADER_DATA_DIR`. Each concurrently running batch needs its own directory.
@@ -171,7 +245,7 @@ Preparation writes a separate file and verifies MP4, H.264/AVC, yuv420p, origina
 
 [The Node adapter](../examples/adminhub-downloader.mjs) exposes `runDownloader` and `downloadForAdminHub`. The latter downloads originals and prepares each locally, returning only verified copies in `files`, with originals listed separately. Pass a complete video request and an optional `onEvent` callback or `AbortSignal`. The adapter invokes the executable directly and sends request JSON through stdin.
 
-For example, from the repository root with Node 20 or newer, replace `VIDEO_URL` with your selected source:
+For example, from the extracted release directory or repository root with Node 20 or newer, replace `VIDEO_URL` with your selected source:
 
 ```bash
 node --input-type=module - 'VIDEO_URL' <<'JS'
@@ -216,3 +290,14 @@ downloader-cli cancel JOB_ID
 Ctrl+C and termination signals cancel a running download or preparation. `cancel` targets a CLI download in the same data directory. Finished files remain in history after cancellation, failure, and restart. Partial downloads are not reported as ready. `--timeout` provides a bounded run for agents.
 
 Only one download batch runs per CLI data directory. History reads and cancellation work from another process. Use separate `--data-dir` directories for parallel batches. The desktop app and CLI do not cancel one another's jobs. GUI-only functions such as in-app playback, window settings, and desktop self-updates are not CLI operations; agents receive local file paths instead.
+
+## Build from source for contributors
+
+Users and agents should install the release binaries above. To change the CLI itself, use a current stable Rust toolchain and a native C/C++ compiler. Linux also needs `pkg-config` and D-Bus development headers. From the repository root:
+
+```bash
+cargo build --release --locked --manifest-path src-tauri/Cargo.toml \
+  --no-default-features --bin downloader-cli
+```
+
+The result is `src-tauri/target/release/downloader-cli`, or `downloader-cli.exe` on Windows. Node, pnpm, GTK, and WebKit are not required for this headless build.
