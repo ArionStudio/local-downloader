@@ -280,13 +280,14 @@ fn prepare_with_limit(
     } else {
         0
     };
-    let budget = ((limit as f64 * 8.0 * 0.93 / duration) - audio_rate as f64).floor();
+    let mut budget = ((limit as f64 * 8.0 * 0.93 / duration) - audio_rate as f64)
+        .floor().min(5_000_000.0);
     let can_copy =
         compatible(&input) && fs::metadata(&source).map_err(|e| e.to_string())?.len() < limit;
     // First preserve compatible streams, or encode with constant quality. Only
     // use two-pass bitrate encoding when the resulting complete file is too big.
-    for attempt in 0..2 {
-        if attempt == 1 {
+    for attempt in 0..3 {
+        if attempt > 0 {
             if budget < 100_000.0 {
                 return Err("This video is too long to fit the XRBAZAAR size limit at useful quality. Choose a shorter segment in Download options.".into());
             }
@@ -329,7 +330,7 @@ fn prepare_with_limit(
                     command
                         .args([
                             "-b:v",
-                            &(budget.min(5_000_000.0) as u64).to_string(),
+                            &(budget as u64).to_string(),
                             "-pass",
                             &pass.to_string(),
                             "-passlogfile",
@@ -364,8 +365,14 @@ fn prepare_with_limit(
             }
             run.run(&mut command)?;
         }
-        if fs::metadata(&output).map_err(|e| e.to_string())?.len() <= limit {
+        let encoded_size = fs::metadata(&output).map_err(|e| e.to_string())?.len();
+        if encoded_size <= limit {
             break;
+        }
+        if attempt > 0 {
+            // Two-pass encoders can overshoot their average bitrate, especially
+            // for short clips. Correct using measured size, then verify again.
+            budget = (budget * (limit as f64 / encoded_size as f64) * 0.90).floor();
         }
     }
     let info = run.probe(ffprobe, &output)?;
