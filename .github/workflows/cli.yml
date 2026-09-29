@@ -1,0 +1,68 @@
+name: CLI native builds
+
+on:
+  workflow_call:
+  push:
+    branches: [t3code/improve-user-interface]
+    paths:
+      - 'src-tauri/**'
+      - 'scripts/cli-release.py'
+      - '.github/workflows/cli.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    name: CLI ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      DOWNLOADER_DATA_DIR: ${{ runner.temp }}/downloader-release-state
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Statically link Windows C runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: cli-${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build standalone CLI
+        run: cargo build --release --locked --manifest-path src-tauri/Cargo.toml --no-default-features --bin downloader-cli --target ${{ matrix.target }}
+      - name: Verify native executable and install its tools
+        run: python scripts/cli-release.py verify ${{ matrix.target }}
+      - name: Test real downloads, cookies, preparation, and cancellation
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --no-default-features --target ${{ matrix.target }} -- --include-ignored
+      - name: Package and verify extracted CLI
+        run: python scripts/cli-release.py package ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: cli-dist/*
+          if-no-files-found: error

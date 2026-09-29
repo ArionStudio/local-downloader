@@ -1,5 +1,6 @@
 use crate::runtime::Runtime;
 use sha2::{Digest, Sha256};
+use ureq::ResponseExt;
 use std::{
     env,
     fs::{self, File},
@@ -166,11 +167,20 @@ struct FfmpegAsset {
     archive_root: &'static str,
 }
 
+fn mac_ffmpeg_base(arch: &str) -> Result<String, String> {
+    let architecture = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        _ => return Err(format!("FFmpeg does not support macOS {arch}.")),
+    };
+    Ok(format!("https://ffmpeg.martin-riedl.de/redirect/latest/macos/{architecture}/release"))
+}
+
 fn install_yt_dlp(app: &Runtime) -> Result<(), String> {
     let asset = yt_dlp_asset()?;
     let tools_dir = app_tools_dir(app)?;
     fs::create_dir_all(&tools_dir).map_err(|error| error.to_string())?;
-    let download_path = temp_path(&tools_dir, "yt-dlp.download");
+    let download_path = temp_executable_path(&tools_dir, "yt-dlp.download");
     let result = (|| {
         download_and_verify(&asset.url, YT_DLP_CHECKSUMS_URL, asset.name, &download_path)?;
         set_executable(&download_path)?;
@@ -191,30 +201,34 @@ fn install_ffmpeg(app: &Runtime) -> Result<(), String> {
 
     let archive_path = temp_path(&tools_dir, "ffmpeg.tar.xz");
     let extract_dir = temp_path(&tools_dir, "ffmpeg.extract");
-    let staged_path = temp_path(&tools_dir, "ffmpeg.download");
-    let staged_probe = temp_path(&tools_dir, "ffprobe.download");
+    let staged_path = temp_executable_path(&tools_dir, "ffmpeg.download");
+    let staged_probe = temp_executable_path(&tools_dir, "ffprobe.download");
 
     let result = (|| {
-        download_and_verify(&asset.url, FFMPEG_CHECKSUMS_URL, asset.name, &archive_path)?;
         fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
-
-        let status = Command::new("tar")
-            .arg("-xJf")
-            .arg(&archive_path)
-            .arg("-C")
-            .arg(&extract_dir)
-            .status()
-            .map_err(|error| format!("Could not run tar to extract ffmpeg: {error}"))?;
-        if !status.success() {
-            return Err(format!(
-                "Could not extract ffmpeg archive: tar exited with {status}"
-            ));
+        if env::consts::OS == "macos" {
+            // Resolve once so FFmpeg, ffprobe, and their checksums share a release.
+            let response = ureq::head(&asset.url).header("User-Agent", USER_AGENT)
+                .call().map_err(|error| format!("Could not resolve FFmpeg release: {error}"))?;
+            let resolved = response.get_uri().to_string();
+            let base = resolved.rsplit_once('/').ok_or("Invalid FFmpeg release URL")?.0;
+            for tool in ["ffmpeg", "ffprobe"] {
+                let name = format!("{tool}.zip");
+                let url = format!("{base}/{name}");
+                download_and_verify(&url, &format!("{url}.sha256"), &name, &archive_path)?;
+                extract_tool_archive(&archive_path, &extract_dir)?;
+            }
+        } else {
+            download_and_verify(&asset.url, FFMPEG_CHECKSUMS_URL, asset.name, &archive_path)?;
+            extract_tool_archive(&archive_path, &extract_dir)?;
         }
 
-        let extracted = extract_dir
-            .join(asset.archive_root)
-            .join("bin")
-            .join(tool_executable_name("ffmpeg"));
+        let binary_dir = if env::consts::OS == "macos" {
+            extract_dir.clone()
+        } else {
+            extract_dir.join(asset.archive_root).join("bin")
+        };
+        let extracted = binary_dir.join(tool_executable_name("ffmpeg"));
         if !extracted.is_file() {
             return Err("Downloaded ffmpeg archive did not contain bin/ffmpeg.".to_string());
         }
@@ -224,10 +238,7 @@ fn install_ffmpeg(app: &Runtime) -> Result<(), String> {
 
         let final_path = updated_tool_path_result(app, "ffmpeg")?;
         verify_download(&staged_path, &["-version"], "ffmpeg")?;
-        let probe = extract_dir
-            .join(asset.archive_root)
-            .join("bin")
-            .join(tool_executable_name("ffprobe"));
+        let probe = binary_dir.join(tool_executable_name("ffprobe"));
         fs::copy(&probe, &staged_probe).map_err(|e| format!("Could not prepare ffprobe: {e}"))?;
         set_executable(&staged_probe)?;
         verify_download(&staged_probe, &["-version"], "ffprobe")?;
@@ -241,6 +252,18 @@ fn install_ffmpeg(app: &Runtime) -> Result<(), String> {
     let _ = fs::remove_dir_all(&extract_dir);
 
     result
+}
+
+fn extract_tool_archive(archive: &Path, destination: &Path) -> Result<(), String> {
+    // BSD tar on macOS/Windows supports ZIP; GNU tar handles Linux tar.xz.
+    // Capture output so a CLI tool installation keeps stdout valid JSON.
+    let output = Command::new("tar")
+        .arg("-xf").arg(archive).arg("-C").arg(destination)
+        .output().map_err(|error| format!("Could not extract FFmpeg: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("Could not extract FFmpeg: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
 }
 
 fn yt_dlp_asset() -> Result<DownloadAsset, String> {
@@ -274,6 +297,13 @@ fn ffmpeg_asset() -> Result<FfmpegAsset, String> {
 }
 
 fn ffmpeg_asset_for(os: &str, arch: &str) -> Result<FfmpegAsset, String> {
+    if os == "macos" {
+        return Ok(FfmpegAsset {
+            name: "ffmpeg.zip",
+            url: format!("{}/ffmpeg.zip", mac_ffmpeg_base(arch)?),
+            archive_root: "",
+        });
+    }
     let (name, archive_root) = match (os, arch) {
         ("linux", "x86_64") => (
             "ffmpeg-master-latest-linux64-gpl.tar.xz",
@@ -282,6 +312,14 @@ fn ffmpeg_asset_for(os: &str, arch: &str) -> Result<FfmpegAsset, String> {
         ("linux", "aarch64") => (
             "ffmpeg-master-latest-linuxarm64-gpl.tar.xz",
             "ffmpeg-master-latest-linuxarm64-gpl",
+        ),
+        ("windows", "x86_64") => (
+            "ffmpeg-master-latest-win64-gpl.zip",
+            "ffmpeg-master-latest-win64-gpl",
+        ),
+        ("windows", "aarch64") => (
+            "ffmpeg-master-latest-winarm64-gpl.zip",
+            "ffmpeg-master-latest-winarm64-gpl",
         ),
         _ => {
             return Err(format!(
@@ -455,6 +493,15 @@ fn temp_path(parent: &Path, label: &str) -> PathBuf {
     parent.join(format!(".{label}-{millis}-{}", std::process::id()))
 }
 
+fn temp_executable_path(parent: &Path, label: &str) -> PathBuf {
+    let path = temp_path(parent, label);
+    if cfg!(windows) {
+        let mut name = path.into_os_string();
+        name.push(".exe");
+        PathBuf::from(name)
+    } else { path }
+}
+
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
     #[cfg(windows)]
     if fs::symlink_metadata(destination).is_ok() {
@@ -559,7 +606,7 @@ mod tests {
             "ffmpeg-master-latest-linuxarm64-gpl.tar.xz"
         );
         assert!(yt_dlp_asset_for("linux", "unknown").is_err());
-        assert!(ffmpeg_asset_for("macos", "aarch64").is_err());
+        assert!(ffmpeg_asset_for("macos", "unknown").is_err());
         assert_eq!(
             yt_dlp_asset_for("windows", "x86_64").unwrap().name,
             "yt-dlp.exe"
@@ -568,6 +615,19 @@ mod tests {
             yt_dlp_asset_for("macos", "aarch64").unwrap().name,
             "yt-dlp_macos"
         );
+    }
+
+    #[test]
+    fn macos_and_windows_ffmpeg_use_native_archives() {
+        for (arch, expected) in [("aarch64", "arm64"), ("x86_64", "amd64")] {
+            let asset = ffmpeg_asset_for("macos", arch).unwrap();
+            assert!(asset.url.contains(&format!("/macos/{expected}/release/")));
+            assert!(asset.url.ends_with("/ffmpeg.zip"));
+        }
+        assert_eq!(ffmpeg_asset_for("windows", "x86_64").unwrap().name,
+            "ffmpeg-master-latest-win64-gpl.zip");
+        assert_eq!(ffmpeg_asset_for("windows", "aarch64").unwrap().name,
+            "ffmpeg-master-latest-winarm64-gpl.zip");
     }
 
     #[test]
