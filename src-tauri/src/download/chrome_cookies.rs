@@ -185,7 +185,13 @@ fn export_cookie_db(
 ) -> Result<(), String> {
     let connection = Connection::open_with_flags(cookie_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| format!("Could not open Chrome cookie database: {error}"))?;
-    let file = File::create(output_path)
+    let mut options = File::options();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(output_path)
         .map_err(|error| format!("Could not create temporary cookie file: {error}"))?;
     let mut writer = BufWriter::new(file);
     writeln!(writer, "# Netscape HTTP Cookie File")

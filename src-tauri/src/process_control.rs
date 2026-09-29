@@ -50,3 +50,26 @@ fn signal_process_group(process_id: u32, signal: libc::c_int) {
         libc::kill(process_group_id, signal);
     }
 }
+
+/// Reap a subprocess on every exit path, including cancellation and errors.
+pub struct ChildGuard(pub std::process::Child);
+impl std::ops::Deref for ChildGuard {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            force_kill_process_group(self.0.id());
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}

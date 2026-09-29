@@ -1,9 +1,9 @@
 use super::{
-    chrome_cookies,
-    AuthSource, BrowserAuthSource, FormatAnalysis, FormatOption, FormatSelection, JobLog,
-    JobStatus, Pipeline, Preset, SiteKind, StartDownloadRequest,
+    chrome_cookies, AuthSource, BrowserAuthSource, FormatAnalysis, FormatOption, FormatSelection,
+    JobLog, JobStatus, Pipeline, Preset, SiteKind, StartDownloadRequest,
 };
-use crate::{commands, process_control, redaction, tools};
+use crate::runtime::Runtime;
+use crate::{backend, process_control, redaction, tools};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -21,7 +21,6 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::AppHandle;
 use url::Url;
 
 const X_TWEET_RESULT_QUERY_ID: &str = "-4_LMahNlI4MuLJ-EAFEog";
@@ -81,7 +80,7 @@ struct AuthAttempt {
 }
 
 pub fn analyze_formats(
-    app: &AppHandle,
+    app: &Runtime,
     url: &str,
     auth: &AuthSource,
 ) -> Result<FormatAnalysis, String> {
@@ -119,6 +118,7 @@ pub fn analyze_formats(
         args.push(target_url);
 
         let output = Command::new(&yt_dlp)
+            .arg("--ignore-config")
             .args(args)
             .output()
             .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
@@ -141,14 +141,15 @@ pub fn analyze_formats(
 }
 
 pub fn run_download(
-    app: AppHandle,
-    state: commands::AppState,
+    app: Runtime,
+    state: backend::AppState,
     job_id: String,
     input: StartDownloadRequest,
     preset: Preset,
     fallback_auth: Option<AuthSource>,
     cancel_flag: Arc<AtomicBool>,
 ) {
+    let xrbazaar = input.output_profile == super::OutputProfile::Xrbazaar;
     if let Err(error) = run_download_inner(
         app.clone(),
         state.clone(),
@@ -156,16 +157,40 @@ pub fn run_download(
         input,
         preset,
         fallback_auth,
-        cancel_flag,
+        cancel_flag.clone(),
     ) {
-        fail_job(&app, &state, &job_id, &error);
+        if cancel_flag.load(Ordering::SeqCst) {
+            let _ = mark_canceled(&app, &state, &job_id);
+        } else {
+            fail_job(&app, &state, &job_id, &error);
+        }
+    } else if let Ok(Some(job)) = state.get_job(&job_id) {
+        if !job.status.is_terminal() {
+            if cancel_flag.load(Ordering::SeqCst) {
+                let _ = mark_canceled(&app, &state, &job_id);
+            } else if let Ok(job) = state.update_job(&job_id, |job| {
+                job.status = JobStatus::Completed;
+                job.progress = 100.0;
+                job.phase = if xrbazaar {
+                    "Ready for XRBAZAAR"
+                } else {
+                    "Completed"
+                }
+                .into();
+                job.speed = None;
+                job.eta = None;
+                job.error_message = None;
+            }) {
+                backend::emit_job(&app, &job, None);
+            }
+        }
     }
     state.remove_cancel_flag(&job_id);
 }
 
 fn run_download_inner(
-    app: AppHandle,
-    state: commands::AppState,
+    app: Runtime,
+    state: backend::AppState,
     job_id: String,
     mut input: StartDownloadRequest,
     preset: Preset,
@@ -393,8 +418,8 @@ enum AttemptOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn run_page_video_attempts(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     preset: &Preset,
@@ -442,11 +467,7 @@ fn run_page_video_attempts(
                 3.0,
                 &format!("Inspecting page data ({})", attempt.label),
             )?;
-            match resolve_embedded_page_video_urls_from_dump(
-                yt_dlp,
-                &input.url,
-                &attempt.auth,
-            ) {
+            match resolve_embedded_page_video_urls_from_dump(yt_dlp, &input.url, &attempt.auth) {
                 Ok(resolved) if !resolved.is_empty() => {
                     targets = resolved;
                     preferred_attempt = Some(attempt_index);
@@ -592,9 +613,9 @@ fn page_video_filename_template(
 ) -> Option<String> {
     let requested = requested.filter(|value| !value.trim().is_empty());
     if target_count == 1 {
-        return requested
-            .map(str::to_string)
-            .or_else(|| page_media_filename(page_url).map(|filename| format!("{filename}.%(ext)s")));
+        return requested.map(str::to_string).or_else(|| {
+            page_media_filename(page_url).map(|filename| format!("{filename}.%(ext)s"))
+        });
     }
 
     let suffix = format!("-video-{:02}", target_index + 1);
@@ -614,8 +635,8 @@ fn page_video_filename_template(
 
 #[allow(clippy::too_many_arguments)]
 fn run_x_article_video_attempts(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     preset: &Preset,
@@ -752,8 +773,8 @@ fn run_x_article_video_attempts(
 
 #[allow(clippy::too_many_arguments)]
 fn run_linkedin_feed_stream_attempts(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     page_url: &str,
@@ -902,8 +923,8 @@ fn resolve_linkedin_feed_stream_url_with_chrome_export(
 
 #[allow(clippy::too_many_arguments)]
 fn run_yt_dlp_with_chrome_cookie_export(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     preset: &Preset,
@@ -973,8 +994,8 @@ fn should_try_targeted_chrome_cookie_export(error: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn run_yt_dlp_attempt(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     preset: &Preset,
@@ -994,33 +1015,88 @@ fn run_yt_dlp_attempt(
         .stderr(Stdio::piped());
     process_control::isolate_process_group(&mut command);
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start yt-dlp: {error}"))?;
+    let mut child = process_control::ChildGuard(
+        command
+            .spawn()
+            .map_err(|error| format!("Could not start yt-dlp: {error}"))?,
+    );
     state.set_process(job_id, child.id())?;
     let _process_registration = ProcessRegistration { state, job_id };
 
     let (sender, receiver) = mpsc::channel::<ProcessLine>();
 
+    let mut reader_threads = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let sender = sender.clone();
-        thread::spawn(move || {
+        let app = app.clone();
+        let state = state.clone();
+        let job_id = job_id.to_owned();
+        reader_threads.push(thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = sender.send(ProcessLine::Stdout(line));
+                let line = ProcessLine::Stdout(line);
+                // Publish originals even while the worker prepares an earlier
+                // video for XRBAZAAR. The worker retries any publication error.
+                if let Some(path) = ready_path_from_line(&line) {
+                    let _ = publish_ready_file(&app, &state, &job_id, &path);
+                }
+                let _ = sender.send(line);
             }
-        });
+        }));
     }
 
     if let Some(stderr) = child.stderr.take() {
         let sender = sender.clone();
-        thread::spawn(move || {
+        reader_threads.push(thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 let _ = sender.send(ProcessLine::Stderr(line));
             }
-        });
+        }));
     }
 
-    loop {
+    let download_pid = child.id();
+    let mut prepared = HashSet::new();
+    let mut file_ready = |path: &str| -> Result<(), String> {
+        if !prepared.insert(path.to_string()) {
+            return Ok(());
+        }
+        publish_ready_file(app, state, job_id, path)?;
+        if input.output_profile == super::OutputProfile::Xrbazaar {
+            let ffmpeg = tools::find_tool(app, "ffmpeg")
+                .ok_or("FFmpeg is required for XRBAZAAR preparation.")?;
+            let ffprobe = tools::find_tool(app, "ffprobe")
+                .ok_or("ffprobe is required for XRBAZAAR verification.")?;
+            update_phase(
+                app,
+                state,
+                job_id,
+                JobStatus::Postprocessing,
+                95.0,
+                "Preparing for XRBAZAAR",
+            )?;
+            let result = super::xrbazaar::prepare_video(
+                &ffmpeg,
+                &ffprobe,
+                Path::new(path),
+                cancel_flag,
+                &mut |pid| state.set_process(job_id, pid.unwrap_or(download_pid)),
+                &mut |percent| {
+                    update_phase(
+                        app,
+                        state,
+                        job_id,
+                        JobStatus::Postprocessing,
+                        95.0 + percent * 0.04,
+                        &format!("Preparing for XRBAZAAR · {}%", percent as u32),
+                    )
+                },
+            );
+            state.set_process(job_id, download_pid)?;
+            publish_ready_file(app, state, job_id, &result?.display().to_string())?;
+        }
+        Ok(())
+    };
+
+    let result = (|| loop {
         if cancel_flag.load(Ordering::SeqCst) {
             process_control::force_kill_process_group(child.id());
             let _ = child.kill();
@@ -1036,6 +1112,7 @@ fn run_yt_dlp_attempt(
             &receiver,
             cancel_flag,
             Some(&mut attempt_logs),
+            &mut file_ready,
             64,
         )?;
 
@@ -1051,9 +1128,16 @@ fn run_yt_dlp_attempt(
             .try_wait()
             .map_err(|error| format!("Could not read yt-dlp status: {error}"))?
         {
+            for reader in reader_threads.drain(..) {
+                let _ = reader.join();
+            }
             while let Ok(line) = receiver.try_recv() {
                 attempt_logs.push(sanitized_process_line_message(&line));
-                handle_process_line(app, state, job_id, line)?;
+                if let Some(path) = ready_path_from_line(&line) {
+                    file_ready(&path)?;
+                } else {
+                    handle_process_line(app, state, job_id, line)?;
+                }
             }
 
             if cancel_flag.load(Ordering::SeqCst) {
@@ -1062,13 +1146,6 @@ fn run_yt_dlp_attempt(
             }
 
             if status.success() {
-                let job = state.update_job(job_id, |job| {
-                    job.status = JobStatus::Completed;
-                    job.progress = 100.0;
-                    job.phase = "Completed".to_string();
-                    job.error_message = None;
-                })?;
-                commands::emit_job(app, &job, None);
                 return Ok(AttemptOutcome::Succeeded);
             }
 
@@ -1078,16 +1155,35 @@ fn run_yt_dlp_attempt(
         }
 
         thread::sleep(Duration::from_millis(180));
+    })();
+    // On cancellation or preparation failure, keep every fully downloaded file
+    // already reported by yt-dlp, including records buffered during conversion.
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        process_control::force_kill_process_group(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
     }
+    for reader in reader_threads {
+        let _ = reader.join();
+    }
+    for line in receiver.try_iter() {
+        if let Some(path) = ready_path_from_line(&line) {
+            if Path::new(&path).is_file() {
+                publish_ready_file(app, state, job_id, &path)?;
+            }
+        }
+    }
+    result
 }
 
 fn drain_process_lines(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     receiver: &Receiver<ProcessLine>,
     cancel_flag: &Arc<AtomicBool>,
     mut captured: Option<&mut Vec<String>>,
+    file_ready: &mut dyn FnMut(&str) -> Result<(), String>,
     limit: usize,
 ) -> Result<(), String> {
     for _ in 0..limit {
@@ -1100,7 +1196,11 @@ fn drain_process_lines(
                 if let Some(captured) = captured.as_mut() {
                     captured.push(sanitized_process_line_message(&line));
                 }
-                handle_process_line(app, state, job_id, line)?;
+                if let Some(path) = ready_path_from_line(&line) {
+                    file_ready(&path)?;
+                } else {
+                    handle_process_line(app, state, job_id, line)?;
+                }
             }
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
@@ -1109,7 +1209,7 @@ fn drain_process_lines(
 }
 
 struct ProcessRegistration<'a> {
-    state: &'a commands::AppState,
+    state: &'a backend::AppState,
     job_id: &'a str,
 }
 
@@ -1125,9 +1225,13 @@ fn build_yt_dlp_args(
     ffmpeg_location: Option<String>,
 ) -> Vec<String> {
     let mut args = vec![
+        "--ignore-config".to_string(),
         "--newline".to_string(),
         "--no-color".to_string(),
         "--progress".to_string(),
+        "--no-simulate".to_string(),
+        "--print".to_string(),
+        "after_move:__DOWNLOADER_READY__%(filepath)j".to_string(),
     ];
 
     if let Some(output_dir) = input.output_dir.as_ref().filter(|value| !value.is_empty()) {
@@ -1448,6 +1552,7 @@ fn x_cookies_for_auth(
             let browser_arg = browser_cookie_arg(&source);
             let cookie_path_arg = cookie_path.display().to_string();
             let output = Command::new(yt_dlp)
+                .arg("--ignore-config")
                 .args([
                     "--cookies-from-browser".to_string(),
                     browser_arg,
@@ -1814,7 +1919,10 @@ fn should_resolve_embedded_page(input: &str) -> bool {
 
 fn page_media_filename(input: &str) -> Option<String> {
     let url = Url::parse(input).ok()?;
-    let slug = url.path_segments()?.filter(|part| !part.is_empty()).next_back()?;
+    let slug = url
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .next_back()?;
     let stem = slug
         .strip_suffix(".html")
         .or_else(|| slug.strip_suffix(".htm"))
@@ -1878,6 +1986,7 @@ fn resolve_embedded_page_video_urls_from_dump(
     args.push(page_url.to_string());
 
     let output = Command::new(yt_dlp)
+        .arg("--ignore-config")
         .args(args)
         .output()
         .map_err(|error| format!("could not start page-data inspection: {error}"))?;
@@ -1934,8 +2043,7 @@ fn http_get_page_text(url: &str) -> Result<String, String> {
 }
 
 fn normalize_embedded_media_html(html: &str) -> String {
-    html
-        .replace("\\\"", "\"")
+    html.replace("\\\"", "\"")
         .replace("\\/", "/")
         .replace("\\u002F", "/")
         .replace("\\u002f", "/")
@@ -1978,8 +2086,8 @@ fn extract_embedded_page_video_urls(html: &str, page_url: &str) -> Vec<String> {
         r#"(?is)<(?:video|source)\b[^>]*\b(?:src|data-src|data-video-url|data-hls|data-dash|data-mp4)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
     )
     .expect("valid native video source regex");
-    let video_block_regex = Regex::new(r#"(?is)<video\b[^>]*>.*?</video\s*>"#)
-        .expect("valid video block regex");
+    let video_block_regex =
+        Regex::new(r#"(?is)<video\b[^>]*>.*?</video\s*>"#).expect("valid video block regex");
     let mut video_block_ranges = Vec::new();
     for video_block in video_block_regex.find_iter(&normalized) {
         video_block_ranges.push(video_block.start()..video_block.end());
@@ -1987,11 +2095,10 @@ fn extract_embedded_page_video_urls(html: &str, page_url: &str) -> Vec<String> {
         for captures in source_regex.captures_iter(video_block.as_str()) {
             let candidate =
                 (1..=3).find_map(|index| captures.get(index).map(|value| value.as_str()));
-            if let Some(url) =
-                candidate.and_then(|value| resolve_media_candidate(page_url, value))
+            if let Some(url) = candidate.and_then(|value| resolve_media_candidate(page_url, value))
             {
-                let position = video_block.start()
-                    + captures.get(0).map_or(0, |capture| capture.start());
+                let position =
+                    video_block.start() + captures.get(0).map_or(0, |capture| capture.start());
                 push_page_candidate(&mut block_candidates, url, 1_000, position);
             }
         }
@@ -2022,7 +2129,10 @@ fn extract_embedded_page_video_urls(html: &str, page_url: &str) -> Vec<String> {
     )
     .expect("valid structured video descriptor regex");
     for captures in structured_regex.captures_iter(&normalized) {
-        let Some(key) = captures.get(1).map(|value| value.as_str().to_ascii_lowercase()) else {
+        let Some(key) = captures
+            .get(1)
+            .map(|value| value.as_str().to_ascii_lowercase())
+        else {
             continue;
         };
         let Some(value) = captures.get(2).map(|value| value.as_str()) else {
@@ -2042,14 +2152,11 @@ fn extract_embedded_page_video_urls(html: &str, page_url: &str) -> Vec<String> {
 
     let mut meta_candidates = Vec::<PageVideoCandidate>::new();
     let meta_regex = Regex::new(r#"(?is)<meta\b[^>]*>"#).expect("valid meta tag regex");
-    let meta_kind_regex = Regex::new(
-        r#"(?is)\b(?:property|name)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
-    )
-    .expect("valid meta kind regex");
-    let content_regex = Regex::new(
-        r#"(?is)\bcontent\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#,
-    )
-    .expect("valid meta content regex");
+    let meta_kind_regex =
+        Regex::new(r#"(?is)\b(?:property|name)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#)
+            .expect("valid meta kind regex");
+    let content_regex = Regex::new(r#"(?is)\bcontent\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s>]+))"#)
+        .expect("valid meta content regex");
     for meta_match in meta_regex.find_iter(&normalized) {
         let tag = meta_match.as_str();
         let kind = meta_kind_regex
@@ -2305,8 +2412,8 @@ fn resolve_stream_descriptor_candidate(
 }
 
 fn extract_squarespace_video_urls(normalized_html: &str) -> Vec<(usize, String)> {
-    let regex = Regex::new(r#""alexandriaUrl"\s*:\s*"([^"]+)""#)
-        .expect("valid Squarespace video regex");
+    let regex =
+        Regex::new(r#""alexandriaUrl"\s*:\s*"([^"]+)""#).expect("valid Squarespace video regex");
     let mut targets = Vec::new();
     for captures in regex.captures_iter(normalized_html) {
         let Some(base_url) = captures.get(1).map(|capture| capture.as_str()) else {
@@ -2344,9 +2451,7 @@ fn extract_squarespace_video_urls(normalized_html: &str) -> Vec<(usize, String)>
 fn resolve_media_candidate(page_url: &str, candidate: &str) -> Option<String> {
     let resolved = resolve_http_candidate(page_url, candidate)?;
     let path = resolved.path().to_ascii_lowercase();
-    const MEDIA_EXTENSIONS: &[&str] = &[
-        ".m3u8", ".mpd", ".mp4", ".mov", ".m4v", ".webm", ".mkv",
-    ];
+    const MEDIA_EXTENSIONS: &[&str] = &[".m3u8", ".mpd", ".mp4", ".mov", ".m4v", ".webm", ".mkv"];
     MEDIA_EXTENSIONS
         .iter()
         .any(|extension| path.ends_with(extension))
@@ -2359,7 +2464,9 @@ fn resolve_http_candidate(page_url: &str, candidate: &str) -> Option<Url> {
         .trim_matches(|character| matches!(character, '"' | '\'' | '<' | '>'))
         .trim_end_matches([',', ';', ')', ']', '}']);
     let page = Url::parse(page_url).ok()?;
-    let resolved = Url::parse(candidate).or_else(|_| page.join(candidate)).ok()?;
+    let resolved = Url::parse(candidate)
+        .or_else(|_| page.join(candidate))
+        .ok()?;
     matches!(resolved.scheme(), "http" | "https").then_some(resolved)
 }
 
@@ -2414,6 +2521,7 @@ fn resolve_linkedin_feed_stream_url(
     args.push(page_url.to_string());
 
     let output = Command::new(yt_dlp)
+        .arg("--ignore-config")
         .args(args)
         .output()
         .map_err(|error| format!("Could not start LinkedIn stream resolver: {error}"))?;
@@ -2436,14 +2544,18 @@ fn resolve_linkedin_feed_stream_url_with_cookie_file_http(
 ) -> Result<String, String> {
     let cookie_header = linkedin_cookie_header_from_file(cookie_path)?;
     let html = http_get_linkedin_text(page_url, &cookie_header)?;
-    choose_linkedin_stream_url(extract_linkedin_stream_urls(&html))
-        .ok_or_else(|| "LinkedIn authenticated page did not expose a DASH or HLS playlist URL.".to_string())
+    choose_linkedin_stream_url(extract_linkedin_stream_urls(&html)).ok_or_else(|| {
+        "LinkedIn authenticated page did not expose a DASH or HLS playlist URL.".to_string()
+    })
 }
 
 fn http_get_linkedin_text(url: &str, cookie_header: &str) -> Result<String, String> {
     let mut response = ureq::get(url)
         .header("User-Agent", BROWSER_USER_AGENT)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("Cookie", cookie_header)
         .call()
@@ -2593,7 +2705,7 @@ fn browser_label(source: &BrowserAuthSource) -> String {
     }
 }
 
-fn browser_cookie_arg(source: &BrowserAuthSource) -> String {
+pub(crate) fn browser_cookie_arg(source: &BrowserAuthSource) -> String {
     let browser = source.browser.trim().to_ascii_lowercase();
     let profile = source.profile.as_ref().and_then(|value| {
         let trimmed = value.trim();
@@ -2795,8 +2907,8 @@ fn sanitized_process_line_message(line: &ProcessLine) -> String {
 }
 
 fn handle_process_line(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     line: ProcessLine,
 ) -> Result<(), String> {
@@ -2833,11 +2945,11 @@ fn handle_process_line(
         }
     })?;
 
-    commands::emit_job(app, &job, Some(log));
+    backend::emit_job(app, &job, Some(log));
     Ok(())
 }
 
-fn parse_output_path(line: &str) -> Option<String> {
+pub(crate) fn parse_output_path(line: &str) -> Option<String> {
     let patterns = [
         r"\[download\] Destination: (.+)$",
         r#"\[Merger\] Merging formats into "(.+)"$"#,
@@ -2885,8 +2997,8 @@ fn parse_progress(line: &str) -> Option<ParsedProgress> {
 }
 
 fn update_phase(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     status: JobStatus,
     progress: f64,
@@ -2897,13 +3009,13 @@ fn update_phase(
         job.progress = progress;
         job.phase = phase.to_string();
     })?;
-    commands::emit_job(app, &job, None);
+    backend::emit_job(app, &job, None);
     Ok(())
 }
 
 fn log(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     level: &str,
     message: &str,
@@ -2911,7 +3023,7 @@ fn log(
     let clean = redaction::sanitize_log_line(message);
     let log = state.append_log(job_id, level, &clean)?;
     if let Some(job) = state.get_job(job_id)? {
-        commands::emit_job(app, &job, Some(log));
+        backend::emit_job(app, &job, Some(log));
     }
     Ok(())
 }
@@ -3051,8 +3163,8 @@ fn browser_cookie_source_from_messages(messages: &[&str]) -> Option<String> {
 }
 
 fn mark_failed(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     error: &str,
 ) -> Result<(), String> {
@@ -3063,11 +3175,11 @@ fn mark_failed(
         job.phase = "Failed".to_string();
         job.error_message = Some(clean);
     })?;
-    commands::emit_job(app, &job, Some(log));
+    backend::emit_job(app, &job, Some(log));
     Ok(())
 }
 
-fn mark_canceled(app: &AppHandle, state: &commands::AppState, job_id: &str) -> Result<(), String> {
+fn mark_canceled(app: &Runtime, state: &backend::AppState, job_id: &str) -> Result<(), String> {
     let log = state.append_log(job_id, "warn", "Canceled by user.")?;
     let job = state.update_job(job_id, |job| {
         job.status = JobStatus::Canceled;
@@ -3075,11 +3187,11 @@ fn mark_canceled(app: &AppHandle, state: &commands::AppState, job_id: &str) -> R
         job.speed = None;
         job.eta = None;
     })?;
-    commands::emit_job(app, &job, Some(log));
+    backend::emit_job(app, &job, Some(log));
     Ok(())
 }
 
-fn fail_job(app: &AppHandle, state: &commands::AppState, job_id: &str, error: &str) {
+fn fail_job(app: &Runtime, state: &backend::AppState, job_id: &str, error: &str) {
     let clean = redaction::sanitize_log_line(error);
     let _ = state.append_log(job_id, "error", &clean);
     if let Ok(job) = state.update_job(job_id, |job| {
@@ -3087,7 +3199,7 @@ fn fail_job(app: &AppHandle, state: &commands::AppState, job_id: &str, error: &s
         job.phase = "Failed".to_string();
         job.error_message = Some(clean.clone());
     }) {
-        commands::emit_job(app, &job, None);
+        backend::emit_job(app, &job, None);
     }
 }
 
@@ -3105,9 +3217,7 @@ mod tests {
 
         assert_eq!(
             extract_embedded_page_video_url(html, "https://portfolio.example/work").as_deref(),
-            Some(
-                "https://video.squarespace-cdn.com/content/v1/site-id/video-id/playlist.m3u8"
-            )
+            Some("https://video.squarespace-cdn.com/content/v1/site-id/video-id/playlist.m3u8")
         );
     }
 
@@ -3134,7 +3244,8 @@ mod tests {
 
     #[test]
     fn resolves_embedded_player_iframes_without_provider_rules() {
-        let html = r#"<iframe loading="lazy" src="https://player.example/video/123?autoplay=0"></iframe>"#;
+        let html =
+            r#"<iframe loading="lazy" src="https://player.example/video/123?autoplay=0"></iframe>"#;
 
         assert_eq!(
             extract_embedded_page_video_url(html, "https://portfolio.example/work").as_deref(),
@@ -3263,13 +3374,8 @@ mod tests {
     #[test]
     fn indexes_page_video_filenames_without_overwriting_siblings() {
         assert_eq!(
-            page_video_filename_template(
-                None,
-                "https://portfolio.example/case-study",
-                1,
-                3
-            )
-            .as_deref(),
+            page_video_filename_template(None, "https://portfolio.example/case-study", 1, 3)
+                .as_deref(),
             Some("case-study-video-02.%(ext)s")
         );
         assert_eq!(
@@ -3613,5 +3719,110 @@ mod tests {
             videos[1].url,
             "https://video.twimg.com/amplify_video/video-1/vid/640x480/high.mp4?tag=1"
         );
+    }
+}
+
+fn ready_path_from_line(line: &ProcessLine) -> Option<String> {
+    let ProcessLine::Stdout(line) = line else {
+        return None;
+    };
+    serde_json::from_str(line.strip_prefix("__DOWNLOADER_READY__")?).ok()
+}
+fn publish_ready_file(
+    app: &Runtime,
+    state: &backend::AppState,
+    job_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    if state
+        .get_job(job_id)?
+        .is_some_and(|job| job.ready_paths.iter().any(|p| p == path))
+    {
+        return Ok(());
+    }
+    if !Path::new(path).is_file() {
+        return Err(format!(
+            "The downloader reported a finished file that is missing: {path}"
+        ));
+    }
+    let log = state.append_log(job_id, "info", &format!("File ready: {path}"))?;
+    let job = state.update_job(job_id, |job| {
+        if !job.ready_paths.iter().any(|p| p == path) {
+            job.ready_paths.push(path.to_string());
+        }
+        job.output_path = Some(path.to_string());
+    })?;
+    backend::emit_job(app, &job, Some(log));
+    Ok(())
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    #[test]
+    fn accepts_only_explicit_final_file_records() {
+        let path = "/tmp/a \"quoted\" & video.mp4";
+        let record = ProcessLine::Stdout(format!(
+            "__DOWNLOADER_READY__{}",
+            serde_json::to_string(path).unwrap()
+        ));
+        assert_eq!(ready_path_from_line(&record).as_deref(), Some(path));
+        assert!(ready_path_from_line(&ProcessLine::Stdout(
+            "[download] Destination: unfinished.mp4".into()
+        ))
+        .is_none());
+        assert!(ready_path_from_line(&ProcessLine::Stderr(
+            "__DOWNLOADER_READY__\"wrong.mp4\"".into()
+        ))
+        .is_none());
+    }
+
+    #[test]
+    #[ignore = "Requires yt-dlp and ffmpeg; downloads through the actual local media server"]
+    fn real_download_reports_final_file_before_the_process_ends() {
+        let root = std::env::temp_dir().join(format!("ready-event-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.mp4");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:size=160x90:rate=15",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let server = crate::media::MediaServer::start().unwrap();
+        let url = server.register(source).unwrap();
+        let input:StartDownloadRequest=serde_json::from_value(json!({"url":url,"presetId":"generic-page-video-highest","outputDir":root.join("downloads"),"auth":{"kind":"none"}})).unwrap();
+        let preset = super::super::presets::find_preset(&input.preset_id).unwrap();
+        let args = build_yt_dlp_args(&input, &preset, None);
+        let mut command = Command::new("yt-dlp");
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        process_control::isolate_process_group(&mut command);
+        let mut child = process_control::ChildGuard(command.spawn().unwrap());
+        let reader = BufReader::new(child.stdout.take().unwrap());
+        let mut ready = None;
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(path) = ready_path_from_line(&ProcessLine::Stdout(line)) {
+                assert!(Path::new(&path).is_file());
+                ready = Some(path);
+                break;
+            }
+        }
+        assert!(child.wait().unwrap().success());
+        assert!(ready.is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 }

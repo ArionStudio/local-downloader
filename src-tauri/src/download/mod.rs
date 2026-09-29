@@ -1,12 +1,13 @@
-mod chrome_cookies;
+pub(crate) mod chrome_cookies;
 pub mod engine;
 pub mod presets;
 pub mod sites;
+pub(crate) mod xrbazaar;
 mod youtube_export;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SiteKind {
     Generic,
@@ -54,14 +55,14 @@ impl SiteKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
     Video,
     Data,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Pipeline {
     YtDlp,
@@ -70,7 +71,7 @@ pub enum Pipeline {
     YoutubeChannelExport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthRequirement {
     None,
@@ -79,7 +80,7 @@ pub enum AuthRequirement {
     Required,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Preset {
     pub id: String,
@@ -91,7 +92,7 @@ pub struct Preset {
     pub auth: AuthRequirement,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzeResult {
     pub normalized_url: String,
@@ -100,7 +101,7 @@ pub struct AnalyzeResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
@@ -145,7 +146,7 @@ impl JobStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
     pub id: String,
@@ -156,6 +157,8 @@ pub struct Job {
     pub preset_id: String,
     pub source_url: String,
     pub output_path: Option<String>,
+    #[serde(default)]
+    pub ready_paths: Vec<String>,
     pub progress: f64,
     pub phase: String,
     pub speed: Option<String>,
@@ -163,7 +166,7 @@ pub struct Job {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobLog {
     pub id: i64,
@@ -173,7 +176,7 @@ pub struct JobLog {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JobDetail {
     #[serde(flatten)]
@@ -181,14 +184,14 @@ pub struct JobDetail {
     pub logs: Vec<JobLog>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserAuthSource {
     pub browser: String,
     pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AuthSource {
     None,
@@ -205,7 +208,7 @@ pub enum AuthSource {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FormatSelection {
     #[default]
@@ -219,7 +222,7 @@ pub enum FormatSelection {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SegmentSelection {
     pub enabled: bool,
@@ -227,7 +230,7 @@ pub struct SegmentSelection {
     pub end_seconds: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AdvancedDownloadOptions {
     #[serde(default)]
@@ -235,9 +238,13 @@ pub struct AdvancedDownloadOptions {
     pub segment: Option<SegmentSelection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartDownloadRequest {
+    #[serde(default = "default_allow_saved_auth")]
+    pub allow_saved_auth: bool,
+    #[serde(default)]
+    pub output_profile: OutputProfile,
     pub url: String,
     #[serde(default)]
     pub channel_urls: Vec<String>,
@@ -251,7 +258,11 @@ pub struct StartDownloadRequest {
     pub advanced: Option<AdvancedDownloadOptions>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_allow_saved_auth() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum YoutubeCatalogueContent {
     #[default]
@@ -341,7 +352,7 @@ mod export_name_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatOption {
     pub format_id: String,
@@ -358,10 +369,20 @@ pub struct FormatOption {
     pub has_audio: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatAnalysis {
     pub title: Option<String>,
     pub duration: Option<f64>,
     pub formats: Vec<FormatOption>,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputProfile {
+    #[default]
+    Original,
+    Xrbazaar,
 }

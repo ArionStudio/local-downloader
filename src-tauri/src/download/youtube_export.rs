@@ -1,5 +1,6 @@
 use super::{sites, JobStatus, StartDownloadRequest, YoutubeCatalogueContent};
-use crate::{commands, process_control, redaction, tools};
+use crate::runtime::Runtime;
+use crate::{backend, process_control, redaction, tools};
 use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, Url as XlsxUrl, Workbook};
@@ -19,7 +20,6 @@ use std::{
     thread,
     time::Duration,
 };
-use tauri::AppHandle;
 use url::Url;
 
 const YOUTUBE_API_ROOT: &str = "https://www.googleapis.com/youtube/v3";
@@ -356,8 +356,8 @@ impl YouTubeApiPool {
 }
 
 pub fn run(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     input: &StartDownloadRequest,
     cancel_flag: &Arc<AtomicBool>,
@@ -703,6 +703,10 @@ pub fn run(
 
     let job = state.update_job(job_id, |job| {
         job.output_path = Some(json_path.display().to_string());
+        job.ready_paths = vec![
+            json_path.display().to_string(),
+            excel_path.display().to_string(),
+        ];
         if errors.is_empty() {
             job.status = JobStatus::Completed;
             job.progress = 100.0;
@@ -710,7 +714,7 @@ pub fn run(
             job.error_message = None;
         }
     })?;
-    commands::emit_job(app, &job, None);
+    backend::emit_job(app, &job, None);
 
     if errors.is_empty() {
         Ok(())
@@ -726,8 +730,8 @@ pub fn run(
 
 #[allow(clippy::too_many_arguments)]
 fn fetch_api_metadata(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     client: &YouTubeApiPool,
     video_urls: &[String],
@@ -1022,6 +1026,7 @@ fn api_error_details(value: &Value) -> (String, Vec<String>) {
 
 fn common_args(sleep_requests: f64) -> Vec<String> {
     let mut args = [
+        "--ignore-config",
         "--quiet",
         "--no-warnings",
         "--skip-download",
@@ -1041,7 +1046,7 @@ fn common_args(sleep_requests: f64) -> Vec<String> {
 fn run_process(
     executable: &Path,
     args: &[String],
-    state: &commands::AppState,
+    state: &backend::AppState,
     job_id: &str,
     cancel_flag: &Arc<AtomicBool>,
 ) -> Result<ProcessResult, String> {
@@ -1397,8 +1402,8 @@ fn process_error(stderr: &[u8]) -> String {
 }
 
 fn update_phase(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     status: JobStatus,
     progress: f64,
@@ -1409,25 +1414,25 @@ fn update_phase(
         job.progress = progress;
         job.phase = phase.to_string();
     })?;
-    commands::emit_job(app, &job, None);
+    backend::emit_job(app, &job, None);
     Ok(())
 }
 
 fn log(
-    app: &AppHandle,
-    state: &commands::AppState,
+    app: &Runtime,
+    state: &backend::AppState,
     job_id: &str,
     level: &str,
     message: &str,
 ) -> Result<(), String> {
     let log = state.append_log(job_id, level, message)?;
     if let Some(job) = state.get_job(job_id)? {
-        commands::emit_job(app, &job, Some(log));
+        backend::emit_job(app, &job, Some(log));
     }
     Ok(())
 }
 
-fn mark_canceled(app: &AppHandle, state: &commands::AppState, job_id: &str) -> Result<(), String> {
+fn mark_canceled(app: &Runtime, state: &backend::AppState, job_id: &str) -> Result<(), String> {
     let job = state.update_job(job_id, |job| {
         job.status = JobStatus::Canceled;
         job.phase = "Canceled".to_string();
@@ -1435,7 +1440,7 @@ fn mark_canceled(app: &AppHandle, state: &commands::AppState, job_id: &str) -> R
         job.eta = None;
         job.error_message = None;
     })?;
-    commands::emit_job(app, &job, None);
+    backend::emit_job(app, &job, None);
     Ok(())
 }
 

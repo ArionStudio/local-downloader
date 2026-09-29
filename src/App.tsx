@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { FormEvent, ReactNode } from "react"
-import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertCircle,
+  ArrowDownToLine,
+  History,
+  Monitor,
+  X,
   Check,
-  ChevronLeft,
   ChevronRight,
   Clipboard,
   ClipboardPaste,
   Copy,
   Download,
+  ExternalLink,
   FolderOpen,
   KeyRound,
   Film,
@@ -27,6 +30,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react"
+import { useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
@@ -53,7 +57,8 @@ import {
   getSettings,
   installAppUpdate,
   installToolUpdate,
-  localFilePreviewUrl,
+  prepareMediaPreview,
+  getToolPlatform,
   listJobs,
   listYoutubeApiKeys,
   onDownloadJobEvent,
@@ -85,7 +90,9 @@ import type {
   Settings as DownloaderSettings,
   SiteKind,
   StartDownloadRequest,
+  OutputProfile,
   ToolUpdate,
+  ToolPlatform,
   YoutubeCatalogueContent,
   YoutubeApiKeyInfo,
 } from "@/lib/types"
@@ -189,15 +196,20 @@ function youtubeExportNameError(value: string): string | null {
   ) {
     return 'Do not use path separators or < > : " | ? *, or end with a period.'
   }
-  if (
-    /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)
-  ) {
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
     return "Choose a different name; this one is reserved by Windows."
   }
   return null
 }
 
 function App() {
+  const startingRequests = useRef(new Set<string>())
+  const [startingUrls, setStartingUrls] = useState<string[]>([])
+  const [startingProfiles, setStartingProfiles] = useState<
+    Record<string, OutputProfile>
+  >({})
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [settingsMessage, setSettingsMessage] = useState("")
   const [url, setUrl] = useState("")
   const [youtubeExportName, setYoutubeExportName] = useState("")
   const [youtubeCatalogueContent, setYoutubeCatalogueContent] =
@@ -380,7 +392,6 @@ function App() {
         : runJobs.filter((job) => job.presetId === runPresetFilter),
     [runJobs, runPresetFilter]
   )
-  const completedJobs = jobs.filter((job) => job.status === "completed")
   const assetsByJob = useMemo(
     () =>
       Object.fromEntries(
@@ -396,10 +407,15 @@ function App() {
   )
   const downloadedAssets = useMemo(
     () =>
-      completedJobs.flatMap((job) =>
-        (assetsByJob[job.id] ?? []).map((path) => ({ path, job }))
-      ),
-    [assetsByJob, completedJobs]
+      jobs
+        .flatMap((job) =>
+          (assetsByJob[job.id] ?? []).map((path) => ({ path, job }))
+        )
+        .filter(
+          (asset, index, all) =>
+            all.findIndex((other) => other.path === asset.path) === index
+        ),
+    [assetsByJob, jobs]
   )
   const downloadNavItems = useMemo(
     () =>
@@ -525,7 +541,23 @@ function App() {
     }
   }
 
-  async function handleStart(sourceUrl: string, preset: Preset) {
+  async function handleStart(
+    sourceUrl: string,
+    preset: Preset,
+    outputProfile: OutputProfile = "original"
+  ) {
+    const requestKey = advancedKey(sourceUrl, preset.id)
+    if (
+      startingRequests.current.has(requestKey) ||
+      jobs.some(
+        (job) =>
+          job.sourceUrl ===
+            (analysesByUrl[sourceUrl]?.normalizedUrl ?? sourceUrl) &&
+          job.presetId === preset.id &&
+          !["completed", "failed", "canceled"].includes(job.status)
+      )
+    )
+      return false
     const analysis = analysesByUrl[sourceUrl]
     if (!analysis) return false
 
@@ -545,7 +577,9 @@ function App() {
       return false
     }
 
+    const advanced = advancedByPreset[key] ?? defaultAdvancedOptions
     const request: StartDownloadRequest = {
+      outputProfile,
       url: analysis.normalizedUrl,
       channelUrls:
         preset.id === "youtube-channel-catalogue"
@@ -554,8 +588,7 @@ function App() {
               .filter((item): item is AnalyzeResult =>
                 Boolean(
                   item?.presets.some(
-                    (candidate) =>
-                      candidate.id === "youtube-channel-catalogue"
+                    (candidate) => candidate.id === "youtube-channel-catalogue"
                   )
                 )
               )
@@ -573,11 +606,20 @@ function App() {
           : undefined,
       filenameTemplate: "%(title).180B [%(id)s].%(ext)s",
       auth,
-      advanced: advancedByPreset[key] ?? defaultAdvancedOptions,
+      advanced:
+        outputProfile === "xrbazaar"
+          ? { ...advanced, format: { kind: "best" } }
+          : advanced,
     }
     pushSessionLog(
       `${new Date().toISOString()} INFO start: ${preset.id} ${analysis.normalizedUrl}`
     )
+    startingRequests.current.add(requestKey)
+    setStartingUrls((current) => [...current, sourceUrl])
+    setStartingProfiles((current) => ({
+      ...current,
+      [sourceUrl]: outputProfile,
+    }))
     try {
       const job = await startDownload(request)
       setJobs((current) => upsertJob(current, job))
@@ -585,6 +627,17 @@ function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       return false
+    } finally {
+      startingRequests.current.delete(requestKey)
+      setStartingUrls((current) => current.filter((url) => url !== sourceUrl))
+    }
+  }
+
+  async function handleCancel(jobId: string) {
+    try {
+      await cancelJob(jobId)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
     }
   }
 
@@ -674,10 +727,19 @@ function App() {
   }
 
   async function handleSaveSettings() {
-    const saved = await updateSettings(draftSettings)
-    setSettings(saved)
-    setDraftSettings(saved)
-    pushSessionLog(`${new Date().toISOString()} INFO settings: saved`)
+    setSavingSettings(true)
+    setSettingsMessage("")
+    try {
+      const saved = await updateSettings(draftSettings)
+      setSettings(saved)
+      setDraftSettings(saved)
+      setSettingsMessage("Settings saved.")
+      pushSessionLog(`${new Date().toISOString()} INFO settings: saved`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSavingSettings(false)
+    }
   }
 
   async function handlePickFolder() {
@@ -847,345 +909,492 @@ function App() {
 
   return (
     <main className="min-h-svh bg-background text-foreground">
-      <div className="mx-auto flex min-h-svh w-full max-w-6xl flex-col px-4 py-5 sm:px-6 lg:px-8">
-        <header className="flex h-10 items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <div className="flex size-8 items-center justify-center rounded-md border bg-card">
-              <Download className="size-4" />
+      <a href="#workspace" className="skip-link">
+        Skip to content
+      </a>
+      <header className="border-b bg-card">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-5 sm:px-8">
+          <div className="flex items-center gap-3 font-semibold">
+            <div className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+              <ArrowDownToLine className="size-5" />
             </div>
-            <span>Downloader</span>
+            Downloader
           </div>
-          <div className="truncate text-xs text-muted-foreground">
-            {appInfo ? `v${appInfo.version}` : "Desktop downloader"}
+          <span className="text-xs text-muted-foreground">
+            {appInfo ? `v${appInfo.version}` : "Desktop app"}
+          </span>
+        </div>
+      </header>
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setActiveTab(value as AppTab)}
+        className="gap-0"
+      >
+        <div className="border-b bg-card">
+          <div className="mx-auto max-w-6xl px-5 sm:px-8">
+            <TabsList
+              variant="line"
+              aria-label="Main navigation"
+              className="app-navigation"
+            >
+              <TabsTrigger value="download">
+                <Download />
+                Download
+              </TabsTrigger>
+              <TabsTrigger value="runs">
+                <History />
+                Activity
+                {runJobs.length > 0 ? (
+                  <span className="nav-count">{runJobs.length}</span>
+                ) : null}
+              </TabsTrigger>
+              <TabsTrigger value="downloaded">
+                <FolderOpen />
+                Files
+                {downloadedAssets.length > 0 ? (
+                  <span className="nav-count">{downloadedAssets.length}</span>
+                ) : null}
+              </TabsTrigger>
+              <TabsTrigger value="settings">
+                <SettingsIcon />
+                Settings
+              </TabsTrigger>
+            </TabsList>
           </div>
-        </header>
-
-        <section className="flex flex-1 flex-col justify-start pt-8">
-          <form onSubmit={handleAnalyze} className="mx-auto w-full max-w-5xl">
-            <div className="group grid min-h-24 grid-cols-[auto_1fr_auto] items-start gap-3 rounded-lg border bg-card px-4 py-3 shadow-sm transition-shadow focus-within:shadow-md">
-              {isAnalyzing ? (
-                <Loader2 className="mt-1 size-5 shrink-0 animate-spin text-muted-foreground" />
-              ) : (
-                <Search className="mt-1 size-5 shrink-0 text-muted-foreground" />
-              )}
-              <textarea
-                value={url}
-                onChange={(event) => handleUrlChange(event.target.value)}
-                placeholder="Paste one or more URLs"
-                className="min-h-16 resize-none bg-transparent text-base leading-6 outline-none placeholder:text-muted-foreground"
-              />
+        </div>
+        <div
+          id="workspace"
+          tabIndex={-1}
+          className="mx-auto w-full max-w-6xl px-5 py-6 outline-none sm:px-8 sm:py-8"
+        >
+          <div className="mb-5">
+            <h1 className="text-xl font-semibold tracking-tight">
+              {
+                {
+                  download: "New download",
+                  runs: "Download activity",
+                  downloaded: "Your files",
+                  settings: "Settings",
+                }[activeTab]
+              }
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {
+                {
+                  download:
+                    "Save videos, audio, or channel catalogues from a link.",
+                  runs: "Follow download progress and review past attempts.",
+                  downloaded:
+                    "Finished files stay here, including files from canceled downloads.",
+                  settings:
+                    "Choose where downloads go and how the app connects to sites.",
+                }[activeTab]
+              }
+            </p>
+          </div>
+          {error ? (
+            <div
+              role="alert"
+              className="mb-5 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+            >
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span className="min-w-0 flex-1 break-words">{error}</span>
               <Button
-                type="button"
-                size="sm"
-                disabled={isAnalyzing}
-                className="gap-1.5 self-start"
-                onClick={handlePaste}
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Dismiss error"
+                onClick={() => setError(null)}
               >
-                <ClipboardPaste className="size-3.5" />
-                Paste
+                <X />
               </Button>
             </div>
-          </form>
-
-          <AnimatePresence mode="popLayout">
-            {error ? (
-              <motion.div
-                layout
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 8 }}
-                className="mx-auto mt-4 flex w-full max-w-3xl items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
-              >
-                <AlertCircle className="size-4" />
-                {error}
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
-
-          <Tabs
-            value={activeTab}
-            onValueChange={(value) => setActiveTab(value as AppTab)}
-            className="mx-auto mt-5 w-full max-w-5xl"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <TabsList>
-                <TabsTrigger value="download">Download</TabsTrigger>
-                <TabsTrigger value="runs">
-                  Runs
-                  {runJobs.length > 0 ? ` ${runJobs.length}` : ""}
-                </TabsTrigger>
-                <TabsTrigger value="downloaded">
-                  Downloaded
-                  {downloadedAssets.length > 0
-                    ? ` ${downloadedAssets.length}`
-                    : ""}
-                </TabsTrigger>
-                <TabsTrigger value="settings">
-                  <SettingsIcon className="size-3.5" />
-                  Settings
-                </TabsTrigger>
-              </TabsList>
-
-              {activeTab === "download" && resultUrls.length > 1 ? (
+          ) : null}
+          <TabsContent value="download" className="space-y-6">
+            <form
+              onSubmit={handleAnalyze}
+              className="overflow-hidden rounded-xl border bg-card"
+            >
+              <div className="px-5 pt-5 sm:px-6">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <Label
+                    htmlFor="download-links"
+                    className="text-sm font-medium"
+                  >
+                    Video or page links
+                  </Label>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={isAnalyzing}
+                    onClick={handlePaste}
+                  >
+                    <ClipboardPaste />
+                    Paste links
+                  </Button>
+                </div>
+                <textarea
+                  id="download-links"
+                  aria-label="Video or page links"
+                  value={url}
+                  onChange={(event) => handleUrlChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      (event.metaKey || event.ctrlKey) &&
+                      event.key === "Enter"
+                    ) {
+                      event.preventDefault()
+                      void handleAnalyze()
+                    }
+                  }}
+                  aria-describedby="download-links-help"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  placeholder="https://www.youtube.com/watch?v=…"
+                  rows={2}
+                  className="min-h-20 w-full resize-y rounded-lg border bg-background p-3 text-sm leading-6 placeholder:text-muted-foreground"
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                  <p
+                    id="download-links-help"
+                    className="text-xs text-muted-foreground"
+                  >
+                    Add one link per line. Links are checked automatically.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {url ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleUrlChange("")}
+                      >
+                        Clear
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="submit"
+                      size="sm"
+                      variant="secondary"
+                      disabled={isAnalyzing || !url.trim()}
+                    >
+                      {isAnalyzing ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <Search />
+                      )}
+                      {isAnalyzing ? "Checking links…" : "Check links"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/40 px-5 py-2 sm:px-6">
+                <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                  <FolderOpen className="size-4 shrink-0" />
+                  <span
+                    className="truncate"
+                    title={settings.defaultOutputDir ?? "Downloads"}
+                  >
+                    Save to{" "}
+                    <span className="font-medium text-foreground">
+                      {settings.defaultOutputDir ?? "Downloads"}
+                    </span>
+                  </span>
+                </div>
                 <Button
                   type="button"
                   size="sm"
-                  className="gap-1.5"
-                  disabled={
-                    inputUrls.some((inputUrl) => !analysesByUrl[inputUrl]) ||
-                    isAnalyzing
-                  }
-                  onClick={handleStartAll}
+                  variant="ghost"
+                  onClick={() => setActiveTab("settings")}
                 >
-                  <Download className="size-3.5" />
-                  Start all
+                  Change folder
                 </Button>
-              ) : null}
-            </div>
+              </div>
+            </form>
+            {inputUrls.length > 0 ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+                  <div className="text-muted-foreground">
+                    {resultUrls.length} result
+                    {resultUrls.length === 1 ? "" : "s"}
+                    {inputUrls.length !== resultUrls.length
+                      ? ` · ${inputUrls.length} links`
+                      : ""}
+                  </div>
+                  {resultUrls.length > 1 ? (
+                    <Button
+                      disabled={
+                        inputUrls.some(
+                          (inputUrl) => !analysesByUrl[inputUrl]
+                        ) || isAnalyzing
+                      }
+                      onClick={handleStartAll}
+                    >
+                      <Download />
+                      Download all
+                    </Button>
+                  ) : null}
+                </div>
+                <div
+                  className={cn(
+                    "grid gap-4",
+                    resultUrls.length > 1 &&
+                      "lg:grid-cols-[168px_minmax(0,1fr)]"
+                  )}
+                >
+                  {resultUrls.length > 1 ? (
+                    <DownloadItemMenu
+                      items={downloadNavItems}
+                      onSelect={scrollToDownloadItem}
+                    />
+                  ) : null}
 
-            <TabsContent value="download" className="mt-4">
-              {inputUrls.length > 0 ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <div className="text-muted-foreground">
-                      {resultUrls.length} result
-                      {resultUrls.length === 1 ? "" : "s"}
-                      {inputUrls.length !== resultUrls.length
-                        ? ` · ${inputUrls.length} links`
+                  <div className="space-y-3">
+                    {resultUrls.map((inputUrl) => {
+                      const analysis = analysesByUrl[inputUrl]
+                      const isChannelCatalogueGroup =
+                        inputUrl === channelCatalogueLeadUrl
+                      const presetId =
+                        selectedPresetByUrl[inputUrl] ??
+                        analysis?.presets[0]?.id
+                      const preset =
+                        analysis?.presets.find(
+                          (item) => item.id === presetId
+                        ) ??
+                        analysis?.presets[0] ??
+                        null
+                      const key =
+                        analysis && preset
+                          ? advancedKey(analysis.normalizedUrl, preset.id)
+                          : inputUrl
+
+                      return (
+                        <div
+                          key={inputUrl}
+                          id={downloadItemDomId(inputUrl)}
+                          className="scroll-mt-24"
+                        >
+                          <DownloadLinkCard
+                            sourceUrl={inputUrl}
+                            starting={startingUrls.includes(inputUrl)}
+                            startingProfile={startingProfiles[inputUrl]}
+                            assetsByJob={assetsByJob}
+                            displayLabel={
+                              isChannelCatalogueGroup &&
+                              channelCatalogueUrls.length > 1
+                                ? `${channelCatalogueUrls.length} YouTube channels`
+                                : undefined
+                            }
+                            analysis={analysis ?? null}
+                            analyzing={
+                              Boolean(analyzingUrls[inputUrl]) ||
+                              (preset?.id === "youtube-channel-catalogue" &&
+                                isAnalyzing)
+                            }
+                            preset={preset}
+                            selectedPresetId={presetId ?? null}
+                            jobs={jobs}
+                            outputDir={settings.defaultOutputDir}
+                            exportName={youtubeExportName}
+                            catalogueContent={youtubeCatalogueContent}
+                            auth={
+                              preset
+                                ? authForPreset(preset, settings.auth)
+                                : settings.auth
+                            }
+                            advancedOptions={
+                              advancedByPreset[key] ?? defaultAdvancedOptions
+                            }
+                            formatInfo={formatsByPreset[key] ?? null}
+                            loadingFormats={loadingFormatsKey === key}
+                            onPresetChange={(nextPresetId) =>
+                              handlePresetChange(
+                                inputUrl,
+                                nextPresetId,
+                                isChannelCatalogueGroup
+                                  ? channelCatalogueUrls
+                                  : undefined
+                              )
+                            }
+                            onExportNameChange={setYoutubeExportName}
+                            onCatalogueContentChange={
+                              setYoutubeCatalogueContent
+                            }
+                            onStart={() =>
+                              preset ? handleStart(inputUrl, preset) : undefined
+                            }
+                            onStartXrbazaar={() =>
+                              preset
+                                ? handleStart(inputUrl, preset, "xrbazaar")
+                                : undefined
+                            }
+                            onCancel={handleCancel}
+                            onCopyLogs={copyJobLogs}
+                            onViewRun={openRunsForPreset}
+                            onAdvancedChange={(nextOptions) =>
+                              preset
+                                ? handleAdvancedChange(
+                                    inputUrl,
+                                    preset,
+                                    nextOptions
+                                  )
+                                : undefined
+                            }
+                            onLoadFormats={() =>
+                              preset
+                                ? handleLoadFormats(inputUrl, preset)
+                                : undefined
+                            }
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </TabsContent>
+
+          <TabsContent value="runs" className="mt-0" id={runsPanelDomId}>
+            {runJobs.length > 0 ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-card px-3 py-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Download history</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Newest first
+                      {runPresetFilter !== allRunPresetsValue
+                        ? ` - ${visibleRunJobs.length} matching`
                         : ""}
                     </div>
                   </div>
-                  <div
-                    className={cn(
-                      "grid gap-3",
-                      resultUrls.length > 1 &&
-                        "lg:grid-cols-[168px_minmax(0,1fr)]"
-                    )}
-                  >
-                    {resultUrls.length > 1 ? (
-                      <DownloadItemMenu
-                        items={downloadNavItems}
-                        onSelect={scrollToDownloadItem}
-                      />
-                    ) : null}
-
-                    <div className="space-y-3">
-                      {resultUrls.map((inputUrl) => {
-                        const analysis = analysesByUrl[inputUrl]
-                        const isChannelCatalogueGroup =
-                          inputUrl === channelCatalogueLeadUrl
-                        const presetId =
-                          selectedPresetByUrl[inputUrl] ??
-                          analysis?.presets[0]?.id
-                        const preset =
-                          analysis?.presets.find(
-                            (item) => item.id === presetId
-                          ) ??
-                          analysis?.presets[0] ??
-                          null
-                        const key =
-                          analysis && preset
-                            ? advancedKey(analysis.normalizedUrl, preset.id)
-                            : inputUrl
-
-                        return (
-                          <div
-                            key={inputUrl}
-                            id={downloadItemDomId(inputUrl)}
-                            className="scroll-mt-24"
-                          >
-                            <DownloadLinkCard
-                              sourceUrl={inputUrl}
-                              displayLabel={
-                                isChannelCatalogueGroup &&
-                                channelCatalogueUrls.length > 1
-                                  ? `${channelCatalogueUrls.length} YouTube channels`
-                                  : undefined
-                              }
-                              analysis={analysis ?? null}
-                              analyzing={
-                                Boolean(analyzingUrls[inputUrl]) ||
-                                (preset?.id === "youtube-channel-catalogue" &&
-                                  isAnalyzing)
-                              }
-                              preset={preset}
-                              selectedPresetId={presetId ?? null}
-                              jobs={jobs}
-                              outputDir={settings.defaultOutputDir}
-                              exportName={youtubeExportName}
-                              catalogueContent={youtubeCatalogueContent}
-                              auth={
-                                preset
-                                  ? authForPreset(preset, settings.auth)
-                                  : settings.auth
-                              }
-                              advancedOptions={
-                                advancedByPreset[key] ?? defaultAdvancedOptions
-                              }
-                              formatInfo={formatsByPreset[key] ?? null}
-                              loadingFormats={loadingFormatsKey === key}
-                              onPresetChange={(nextPresetId) =>
-                                handlePresetChange(
-                                  inputUrl,
-                                  nextPresetId,
-                                  isChannelCatalogueGroup
-                                    ? channelCatalogueUrls
-                                    : undefined
-                                )
-                              }
-                              onExportNameChange={setYoutubeExportName}
-                              onCatalogueContentChange={
-                                setYoutubeCatalogueContent
-                              }
-                              onStart={() =>
-                                preset
-                                  ? handleStart(inputUrl, preset)
-                                  : undefined
-                              }
-                              onCancel={(jobId) => cancelJob(jobId)}
-                              onCopyLogs={copyJobLogs}
-                              onViewRun={openRunsForPreset}
-                              onAdvancedChange={(nextOptions) =>
-                                preset
-                                  ? handleAdvancedChange(
-                                      inputUrl,
-                                      preset,
-                                      nextOptions
-                                    )
-                                  : undefined
-                              }
-                              onLoadFormats={() =>
-                                preset
-                                  ? handleLoadFormats(inputUrl, preset)
-                                  : undefined
-                              }
-                            />
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <EmptyPanel message="Paste one or more links to configure downloads." />
-              )}
-            </TabsContent>
-
-            <TabsContent value="runs" className="mt-4" id={runsPanelDomId}>
-              {runJobs.length > 0 ? (
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-card px-3 py-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">Runs</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        Newest first
-                        {runPresetFilter !== allRunPresetsValue
-                          ? ` - ${visibleRunJobs.length} matching`
-                          : ""}
-                      </div>
-                    </div>
-                    <div className="w-full space-y-1 sm:w-72">
-                      <Label className="text-xs text-muted-foreground">
-                        Preset
-                      </Label>
-                      <Select
-                        value={runPresetFilter}
-                        onValueChange={(value) =>
-                          setRunPresetFilter(value ?? allRunPresetsValue)
-                        }
-                        items={[
-                          {
-                            value: allRunPresetsValue,
-                            label: "All presets",
-                          },
-                          ...runPresetOptions.map((option) => ({
-                            value: option.id,
-                            label: `${option.label} (${option.count})`,
-                          })),
-                        ]}
+                  <div className="w-full space-y-1 sm:w-72">
+                    <Label className="text-xs text-muted-foreground">
+                      Preset
+                    </Label>
+                    <Select
+                      value={runPresetFilter}
+                      onValueChange={(value) =>
+                        setRunPresetFilter(value ?? allRunPresetsValue)
+                      }
+                      items={[
+                        {
+                          value: allRunPresetsValue,
+                          label: "All presets",
+                        },
+                        ...runPresetOptions.map((option) => ({
+                          value: option.id,
+                          label: `${option.label} (${option.count})`,
+                        })),
+                      ]}
+                    >
+                      <SelectTrigger
+                        aria-label="Filter by download type"
+                        className="h-9 w-full bg-background"
                       >
-                        <SelectTrigger className="h-9 w-full bg-background">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent align="start">
-                          <SelectItem value={allRunPresetsValue}>
-                            All presets
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent align="start">
+                        <SelectItem value={allRunPresetsValue}>
+                          All presets
+                        </SelectItem>
+                        {runPresetOptions.map((option) => (
+                          <SelectItem key={option.id} value={option.id}>
+                            {option.label} ({option.count})
                           </SelectItem>
-                          {runPresetOptions.map((option) => (
-                            <SelectItem key={option.id} value={option.id}>
-                              {option.label} ({option.count})
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-
-                  {visibleRunJobs.length > 0 ? (
-                    visibleRunJobs.map((job) => (
-                      <div
-                        key={job.id}
-                        id={jobRunDomId(job.id)}
-                        className="scroll-mt-24"
-                      >
-                        <JobRunItem
-                          job={job}
-                          assets={
-                            assetsByJob[job.id]?.map((path) => ({
-                              path,
-                              job,
-                            })) ?? []
-                          }
-                          onCopyLogs={() => copyJobLogs(job)}
-                        />
-                      </div>
-                    ))
-                  ) : (
-                    <EmptyPanel message="No runs match this preset." />
-                  )}
                 </div>
-              ) : (
-                <EmptyPanel message="Started runs will appear here." />
-              )}
-            </TabsContent>
 
-            <TabsContent value="downloaded" className="mt-4">
-              {downloadedAssets.length > 0 ? (
-                <div className="grid gap-3 lg:grid-cols-2">
-                  {downloadedAssets.map((asset) => (
-                    <DownloadedAssetItem
-                      key={`${asset.job.id}:${asset.path}`}
-                      asset={asset}
-                      onCopyLogs={() => copyJobLogs(asset.job)}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <EmptyPanel message="Downloaded assets will appear here." />
-              )}
-            </TabsContent>
-
-            <TabsContent value="settings" className="mt-4">
-              <SettingsPage
-                appInfo={appInfo}
-                appUpdateState={appUpdateState}
-                toolCheckState={toolCheckState}
-                settings={draftSettings}
-                savedSettings={settings}
-                sessionLogs={sessionLogs}
-                onChange={setDraftSettings}
-                onPickFolder={handlePickFolder}
-                onSave={handleSaveSettings}
-                onCheckAppUpdate={handleCheckAppUpdate}
-                onInstallAppUpdate={handleInstallAppUpdate}
-                onCheckTools={handleCheckTools}
-                onInstallTool={handleInstallTool}
-                onCopyLogs={copyAllLogs}
+                {visibleRunJobs.length > 0 ? (
+                  visibleRunJobs.map((job) => (
+                    <div
+                      key={job.id}
+                      id={jobRunDomId(job.id)}
+                      className="scroll-mt-24"
+                    >
+                      <JobRunItem
+                        job={job}
+                        onCancel={() => handleCancel(job.id)}
+                        assets={
+                          assetsByJob[job.id]?.map((path) => ({
+                            path,
+                            job,
+                          })) ?? []
+                        }
+                        onCopyLogs={() => copyJobLogs(job)}
+                      />
+                    </div>
+                  ))
+                ) : (
+                  <EmptyPanel message="No runs match this preset." />
+                )}
+              </div>
+            ) : (
+              <EmptyPanel
+                icon={<History />}
+                title="No downloads started"
+                message="Start a download to see its progress, status, and any errors here."
+                action={
+                  <Button onClick={() => setActiveTab("download")}>
+                    <Download />
+                    New download
+                  </Button>
+                }
               />
-            </TabsContent>
-          </Tabs>
-        </section>
-      </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="downloaded" className="mt-0">
+            {downloadedAssets.length > 0 ? (
+              <div className="grid gap-3 lg:grid-cols-2">
+                {downloadedAssets.map((asset) => (
+                  <DownloadedAssetItem
+                    key={`${asset.job.id}:${asset.path}`}
+                    asset={asset}
+                    onCopyLogs={() => copyJobLogs(asset.job)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <EmptyPanel
+                icon={<FolderOpen />}
+                title="Your downloads will appear here"
+                message="Completed files are ready to preview, open, or reveal in their folder."
+                action={
+                  <Button onClick={() => setActiveTab("download")}>
+                    <Download />
+                    New download
+                  </Button>
+                }
+              />
+            )}
+          </TabsContent>
+
+          <TabsContent value="settings" className="mt-0">
+            <SettingsPage
+              appInfo={appInfo}
+              appUpdateState={appUpdateState}
+              toolCheckState={toolCheckState}
+              settings={draftSettings}
+              savedSettings={settings}
+              sessionLogs={sessionLogs}
+              onChange={setDraftSettings}
+              onPickFolder={handlePickFolder}
+              onSave={handleSaveSettings}
+              saving={savingSettings}
+              saveMessage={settingsMessage}
+              onCheckAppUpdate={handleCheckAppUpdate}
+              onInstallAppUpdate={handleInstallAppUpdate}
+              onCheckTools={handleCheckTools}
+              onInstallTool={handleInstallTool}
+              onCopyLogs={copyAllLogs}
+            />
+          </TabsContent>
+        </div>
+      </Tabs>
     </main>
   )
 }
@@ -1200,6 +1409,8 @@ type SettingsPageProps = {
   onChange: (settings: DownloaderSettings) => void
   onPickFolder: () => void
   onSave: () => void
+  saving: boolean
+  saveMessage: string
   onCheckAppUpdate: () => void
   onInstallAppUpdate: () => void
   onCheckTools: () => void
@@ -1217,12 +1428,21 @@ function SettingsPage({
   onChange,
   onPickFolder,
   onSave,
+  saving,
+  saveMessage,
   onCheckAppUpdate,
   onInstallAppUpdate,
   onCheckTools,
   onInstallTool,
   onCopyLogs,
 }: SettingsPageProps) {
+  const { theme, setTheme } = useTheme()
+  const [platform, setPlatform] = useState<ToolPlatform | null>(null)
+  useEffect(() => {
+    getToolPlatform()
+      .then(setPlatform)
+      .catch(() => undefined)
+  }, [])
   const [youtubeApiKeys, setYoutubeApiKeys] = useState<YoutubeApiKeyInfo[]>([])
   const [newYoutubeApiKey, setNewYoutubeApiKey] = useState("")
   const [youtubeApiKeyBusy, setYoutubeApiKeyBusy] = useState(false)
@@ -1315,261 +1535,186 @@ function SettingsPage({
 
   return (
     <div className="grid gap-4">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-        <section className="rounded-lg border bg-card p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <RefreshCw className="size-4" />
-                App update
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {appInfo?.name ?? "Downloader"}{" "}
-                {appInfo ? `v${appInfo.version}` : "version loading"}
-              </div>
-            </div>
-            <StatusBadge status={appUpdateState.status}>
-              {appUpdateStatusLabel(appUpdateState)}
-            </StatusBadge>
-          </div>
-
-          <div className="mt-4 grid gap-3">
-            <InfoRow
-              label="Current version"
-              value={appInfo ? `v${appInfo.version}` : "Loading"}
-            />
-            <InfoRow
-              label="Update feed"
-              value={appInfo?.updaterEndpoint ?? "Loading"}
-              mono
-            />
-            <InfoRow
-              label="Last check"
-              value={formatCheckedAt(appUpdateState.checkedAt)}
-            />
-            <InfoRow label="State" value={appUpdateState.message} />
-            {appUpdateState.update ? (
-              <>
-                <InfoRow
-                  label="Available version"
-                  value={`v${appUpdateState.update.version}`}
-                />
-                <InfoRow
-                  label="Release notes"
-                  value={appUpdateState.update.notes || "No release notes."}
-                />
-              </>
-            ) : null}
-          </div>
-
-          <div className="mt-4 flex flex-wrap justify-end gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              className="gap-1.5"
-              disabled={appUpdateState.status === "checking"}
-              onClick={onCheckAppUpdate}
-            >
-              {appUpdateState.status === "checking" ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
-              )}
-              Check app
-            </Button>
-            <Button
-              type="button"
-              className="gap-1.5"
-              disabled={
-                appUpdateState.status !== "available" &&
-                appUpdateState.status !== "failed"
-              }
-              onClick={onInstallAppUpdate}
-            >
-              <Download className="size-3.5" />
-              Install app update
-            </Button>
-          </div>
-        </section>
-
-        <section className="rounded-lg border bg-card p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Wrench className="size-4" />
-                Tools
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {toolCheckState.tools.length > 0
-                  ? `${toolCheckState.tools.length - issueTools.length} ready, ${issueTools.length} issue${issueTools.length === 1 ? "" : "s"}`
-                  : "Status not loaded"}
-              </div>
-            </div>
-            <StatusBadge status={toolCheckState.status}>
-              {toolStatusLabel(toolCheckState)}
-            </StatusBadge>
-          </div>
-
-          <div className="mt-4 grid gap-2">
-            {toolCheckState.tools.length > 0 ? (
-              toolCheckState.tools.map((tool) => (
-                <ToolStatusItem
-                  key={tool.tool}
-                  tool={tool}
-                  installing={toolCheckState.status === "installing"}
-                  onInstall={() => onInstallTool(tool.tool)}
-                />
-              ))
-            ) : (
-              <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
-                {toolCheckState.message}
-              </div>
-            )}
-          </div>
-
-          <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
-            <div>
-              Search order: app data tools, bundled resources, system PATH,
-              `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
-            </div>
-            <div>
-              Installer: downloads verified upstream release assets into app
-              data tools.
-            </div>
-            <div>Last check: {formatCheckedAt(toolCheckState.checkedAt)}</div>
-          </div>
-
-          <div className="mt-4 flex justify-end">
-            <Button
-              type="button"
-              variant="outline"
-              className="gap-1.5"
-              disabled={
-                toolCheckState.status === "checking" ||
-                toolCheckState.status === "installing"
-              }
-              onClick={onCheckTools}
-            >
-              {["checking", "installing"].includes(toolCheckState.status) ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="size-3.5" />
-              )}
-              Refresh tools
-            </Button>
-          </div>
-        </section>
-      </div>
-
-      <section className="rounded-lg border bg-card p-4">
+      <section className="rounded-xl border bg-card p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2 text-sm font-medium">
               <SettingsIcon className="size-4" />
               Downloader settings
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              {hasUnsavedSettings ? "Unsaved changes" : "Saved"}
+            <div role="status" className="mt-1 text-xs text-muted-foreground">
+              {hasUnsavedSettings
+                ? "You have unsaved changes."
+                : saveMessage || "Default folder and site access."}
             </div>
           </div>
-          <Button type="button" onClick={onSave} disabled={!hasUnsavedSettings}>
-            Save settings
-          </Button>
-        </div>
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-[1fr_auto]">
-          <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">Download folder</div>
-            <div className="mt-0.5 truncate">
-              {settings.defaultOutputDir ?? "Downloads"}
-            </div>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="gap-2"
-            onClick={onPickFolder}
-          >
-            <FolderOpen className="size-4" />
-            Folder
-          </Button>
-        </div>
-
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Auth</Label>
-            <Select
-              value={authMode}
-              onValueChange={setAuthMode}
-              items={[
-                { value: "browser", label: "Browser cookies" },
-                { value: "cookie_file", label: "cookies.txt" },
-                { value: "none", label: "None" },
-              ]}
+          <div className="flex gap-2">
+            {hasUnsavedSettings ? (
+              <Button
+                variant="ghost"
+                disabled={saving}
+                onClick={() => onChange(savedSettings)}
+              >
+                Discard changes
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              onClick={onSave}
+              disabled={!hasUnsavedSettings || saving}
             >
-              <SelectTrigger className="h-9 w-full bg-background">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="start">
-                <SelectItem value="browser">Browser cookies</SelectItem>
-                <SelectItem value="cookie_file">cookies.txt</SelectItem>
-                <SelectItem value="none">None</SelectItem>
-              </SelectContent>
-            </Select>
+              {saving ? <Loader2 className="animate-spin" /> : <Check />}
+              {saving ? "Saving…" : "Save settings"}
+            </Button>
           </div>
+        </div>
 
-          <div className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
-            Browser fallback
-            <div className="grid grid-cols-2 gap-2 rounded-md border bg-background p-2 sm:grid-cols-4">
-              {browsers.map((browserName) => {
-                const checked = selectedBrowsers.some(
-                  (source) => source.browser === browserName
-                )
-                return (
-                  <label
-                    key={browserName}
-                    className={cn(
-                      "flex h-8 items-center gap-2 rounded border px-2 text-xs text-foreground capitalize",
-                      authMode !== "browser" && "opacity-50"
-                    )}
-                  >
-                    <Checkbox
-                      checked={checked}
-                      disabled={authMode !== "browser"}
-                      onCheckedChange={(nextChecked) =>
-                        setBrowserEnabled(browserName, Boolean(nextChecked))
-                      }
-                    />
-                    {browserName}
-                  </label>
-                )
-              })}
+        <fieldset disabled={saving} className="min-w-0">
+          <div className="mt-5 grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
+              <div className="text-xs text-muted-foreground">
+                Download folder
+              </div>
+              <div className="mt-0.5 truncate">
+                {settings.defaultOutputDir ?? "Downloads"}
+              </div>
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
+              onClick={onPickFolder}
+            >
+              <FolderOpen className="size-4" />
+              Choose folder
+            </Button>
           </div>
 
-          <label className="space-y-1 text-xs text-muted-foreground sm:col-span-3">
-            Cookie file
-            <input
-              value={cookieFile}
-              disabled={authMode !== "cookie_file"}
-              onChange={(event) =>
-                setAuth({ kind: "cookie_file", path: event.target.value })
-              }
-              placeholder="/path/to/cookies.txt"
-              className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none disabled:opacity-50"
-            />
-          </label>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="space-y-1">
+              <Label
+                htmlFor="site-access"
+                className="text-xs text-muted-foreground"
+              >
+                Site access
+              </Label>
+              <Select
+                value={authMode}
+                onValueChange={setAuthMode}
+                items={[
+                  { value: "browser", label: "Browser cookies" },
+                  { value: "cookie_file", label: "cookies.txt" },
+                  { value: "none", label: "None" },
+                ]}
+              >
+                <SelectTrigger
+                  id="site-access"
+                  aria-label="Site access"
+                  className="h-9 w-full bg-background"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  <SelectItem value="browser">Browser cookies</SelectItem>
+                  <SelectItem value="cookie_file">cookies.txt</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {authMode === "browser" ? (
+              <div className="space-y-2 text-xs text-muted-foreground sm:col-span-2">
+                Use cookies from these browsers
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {browsers.map((browserName) => {
+                    const checked = selectedBrowsers.some(
+                      (source) => source.browser === browserName
+                    )
+                    return (
+                      <label
+                        key={browserName}
+                        className={cn(
+                          "flex h-8 items-center gap-2 rounded px-2 text-xs text-foreground capitalize hover:bg-muted",
+                          authMode !== "browser" && "opacity-50"
+                        )}
+                      >
+                        <Checkbox
+                          aria-label={`${browserName} cookies`}
+                          checked={checked}
+                          disabled={authMode !== "browser"}
+                          onCheckedChange={(nextChecked) =>
+                            setBrowserEnabled(browserName, Boolean(nextChecked))
+                          }
+                        />
+                        {browserName}
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            {authMode === "cookie_file" ? (
+              <label className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
+                Cookie file
+                <input
+                  value={cookieFile}
+                  disabled={authMode !== "cookie_file"}
+                  onChange={(event) =>
+                    setAuth({ kind: "cookie_file", path: event.target.value })
+                  }
+                  placeholder="/path/to/cookies.txt"
+                  className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none disabled:opacity-50"
+                />
+              </label>
+            ) : null}
+          </div>
+        </fieldset>
+      </section>
+
+      <section className="rounded-xl border bg-card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-medium">
+              <Monitor className="size-4" />
+              Appearance
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Use a light, dark, or system theme. Changes apply immediately.
+            </p>
+          </div>
+          <Select
+            value={theme}
+            onValueChange={(value) => {
+              if (value === "light" || value === "dark" || value === "system")
+                setTheme(value)
+            }}
+            items={[
+              { value: "system", label: "System" },
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" },
+            ]}
+          >
+            <SelectTrigger aria-label="Appearance" className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="system">System</SelectItem>
+              <SelectItem value="light">Light</SelectItem>
+              <SelectItem value="dark">Dark</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </section>
 
-      <section className="rounded-lg border bg-card p-4">
+      <section className="rounded-xl border bg-card p-5">
         <div className="flex items-start gap-2">
           <KeyRound className="mt-0.5 size-4" />
           <div>
             <div className="text-sm font-medium">YouTube Data API keys</div>
             <div className="mt-1 text-xs text-muted-foreground">
-              Encrypted by the OS credential vault. Multiple keys are rotated
-              across API batches and used as quota fallbacks.
+              Add a key for faster YouTube channel exports. Keys are stored
+              securely on your device.
             </div>
           </div>
         </div>
@@ -1646,24 +1791,157 @@ function SettingsPage({
         </div>
       </section>
 
-      <section className="rounded-lg border bg-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Clipboard className="size-4" />
-              Session log
+      <div className="grid items-start gap-4 lg:grid-cols-2">
+        <section className="rounded-xl border bg-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <RefreshCw className="size-4" />
+                App update
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {appInfo?.name ?? "Downloader"}{" "}
+                {appInfo ? `v${appInfo.version}` : "version loading"}
+              </div>
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              {sessionLogs.length} line{sessionLogs.length === 1 ? "" : "s"}
-            </div>
+            <StatusBadge status={appUpdateState.status}>
+              {appUpdateStatusLabel(appUpdateState)}
+            </StatusBadge>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="gap-1.5"
-            onClick={onCopyLogs}
-          >
-            <Clipboard className="size-3.5" />
+
+          <div className="mt-4 grid gap-3">
+            <InfoRow
+              label="Current version"
+              value={appInfo ? `v${appInfo.version}` : "Loading"}
+            />
+            <InfoRow
+              label="Update feed"
+              value={appInfo?.updaterEndpoint ?? "Loading"}
+              mono
+            />
+            <InfoRow
+              label="Last check"
+              value={formatCheckedAt(appUpdateState.checkedAt)}
+            />
+            <InfoRow label="State" value={appUpdateState.message} />
+            {appUpdateState.update ? (
+              <>
+                <InfoRow
+                  label="Available version"
+                  value={`v${appUpdateState.update.version}`}
+                />
+                <InfoRow
+                  label="Release notes"
+                  value={appUpdateState.update.notes || "No release notes."}
+                />
+              </>
+            ) : null}
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              disabled={appUpdateState.status === "checking"}
+              onClick={onCheckAppUpdate}
+            >
+              {appUpdateState.status === "checking" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Check app
+            </Button>
+            <Button
+              type="button"
+              className="gap-1.5"
+              disabled={
+                appUpdateState.status !== "available" &&
+                appUpdateState.status !== "failed"
+              }
+              onClick={onInstallAppUpdate}
+            >
+              <Download className="size-3.5" />
+              Install app update
+            </Button>
+          </div>
+        </section>
+
+        <section className="rounded-xl border bg-card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Wrench className="size-4" />
+                Tools
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {toolCheckState.tools.length > 0
+                  ? `${toolCheckState.tools.length - issueTools.length} ready, ${issueTools.length} issue${issueTools.length === 1 ? "" : "s"}`
+                  : "Status not loaded"}
+              </div>
+            </div>
+            <StatusBadge status={toolCheckState.status}>
+              {toolStatusLabel(toolCheckState)}
+            </StatusBadge>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            {toolCheckState.tools.length > 0 ? (
+              toolCheckState.tools.map((tool) => (
+                <ToolStatusItem
+                  key={tool.tool}
+                  tool={tool}
+                  installing={toolCheckState.status === "installing"}
+                  platform={platform}
+                  onInstall={() => onInstallTool(tool.tool)}
+                />
+              ))
+            ) : (
+              <div className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                {toolCheckState.message}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
+            <div>yt-dlp downloads media. ffmpeg combines video and audio.</div>
+            <div>Missing tools can be installed here.</div>
+            <div>Last check: {formatCheckedAt(toolCheckState.checkedAt)}</div>
+          </div>
+
+          <div className="mt-4 flex">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5"
+              disabled={
+                toolCheckState.status === "checking" ||
+                toolCheckState.status === "installing"
+              }
+              onClick={onCheckTools}
+            >
+              {["checking", "installing"].includes(toolCheckState.status) ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="size-3.5" />
+              )}
+              Refresh tools
+            </Button>
+          </div>
+        </section>
+      </div>
+
+      <details className="rounded-xl border bg-card p-5">
+        <summary className="cursor-pointer text-sm font-medium">
+          Session log{" "}
+          <span className="ml-2 font-normal text-muted-foreground">
+            {sessionLogs.length} lines
+          </span>
+        </summary>
+        <div className="mt-4 flex justify-end">
+          <Button variant="outline" onClick={onCopyLogs}>
+            <Clipboard />
             Copy logs
           </Button>
         </div>
@@ -1678,7 +1956,7 @@ function SettingsPage({
             <div className="text-muted-foreground">No logs yet.</div>
           )}
         </div>
-      </section>
+      </details>
     </div>
   )
 }
@@ -1709,13 +1987,17 @@ function ToolStatusItem({
   tool,
   installing,
   onInstall,
+  platform,
 }: {
   tool: ToolUpdate
+  platform: ToolPlatform | null
   installing: boolean
   onInstall: () => void
 }) {
   const installed = tool.status === "installed"
-  const installable = !installed
+  const asset =
+    tool.tool === "yt-dlp" ? platform?.ytDlpAsset : platform?.ffmpegAsset
+  const installable = !installed && Boolean(asset)
 
   return (
     <div className="rounded-md border bg-background px-3 py-3">
@@ -1733,6 +2015,15 @@ function ToolStatusItem({
             </div>
             <div className="break-words">Path: {tool.path ?? "Not found"}</div>
             <div className="break-words">{tool.message}</div>
+            {platform ? (
+              <div className="break-words">
+                System: {platform.os} / {platform.arch}
+                <br />
+                {asset
+                  ? `Installer: ${asset}`
+                  : "Automatic installation is not available for this system."}
+              </div>
+            ) : null}
           </div>
         </div>
         {installable ? (
@@ -1824,6 +2115,9 @@ function DownloadItemMenu({
 
 type DownloadLinkCardProps = {
   sourceUrl: string
+  starting: boolean
+  startingProfile?: OutputProfile
+  assetsByJob: Record<string, string[]>
   displayLabel?: string
   analysis: AnalyzeResult | null
   analyzing: boolean
@@ -1841,6 +2135,7 @@ type DownloadLinkCardProps = {
   onExportNameChange: (name: string) => void
   onCatalogueContentChange: (content: YoutubeCatalogueContent) => void
   onStart: () => void
+  onStartXrbazaar: () => void
   onCancel: (jobId: string) => void
   onCopyLogs: (job: Job) => void
   onViewRun: (presetId: string) => void
@@ -1850,6 +2145,9 @@ type DownloadLinkCardProps = {
 
 function DownloadLinkCard({
   sourceUrl,
+  starting,
+  startingProfile,
+  assetsByJob,
   displayLabel,
   analysis,
   analyzing,
@@ -1867,6 +2165,7 @@ function DownloadLinkCard({
   onExportNameChange,
   onCatalogueContentChange,
   onStart,
+  onStartXrbazaar,
   onCancel,
   onCopyLogs,
   onViewRun,
@@ -1882,6 +2181,22 @@ function DownloadLinkCard({
               item.sourceUrl === analysis.normalizedUrl)
         ) ?? null)
       : null
+  const readyAssets = jobs
+    .filter(
+      (item) =>
+        analysis &&
+        preset &&
+        item.presetId === preset.id &&
+        (preset.id === "youtube-channel-catalogue" ||
+          item.sourceUrl === analysis.normalizedUrl)
+    )
+    .flatMap((item) =>
+      (assetsByJob[item.id] ?? []).map((path) => ({ path, job: item }))
+    )
+    .filter(
+      (asset, index, all) =>
+        all.findIndex((other) => other.path === asset.path) === index
+    )
   const running =
     job && !["completed", "failed", "canceled"].includes(job.status)
   const presetAuth = preset?.auth ?? "none"
@@ -1892,8 +2207,8 @@ function DownloadLinkCard({
       : null
 
   return (
-    <div className="rounded-lg border bg-card p-4">
-      <div className="grid gap-3 lg:grid-cols-[1fr_220px]">
+    <div className="download-card">
+      <div className="download-card-heading">
         <div className="min-w-0 space-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
             {analysis ? (
@@ -1914,19 +2229,22 @@ function DownloadLinkCard({
               </span>
             ) : null}
           </div>
-          <div className="truncate text-sm font-medium">
+          <div
+            className="line-clamp-2 text-sm font-medium break-all"
+            title={sourceUrl}
+          >
             {displayLabel ?? sourceUrl}
           </div>
           {analysis?.warnings.length ? (
-            <div className="flex items-center gap-1.5 text-xs text-amber-700">
-              <Shield className="size-3.5" />
+            <div className="flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300">
+              <Shield className="size-3.5 shrink-0" />
               {analysis.warnings[0]}
             </div>
           ) : null}
         </div>
 
         <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Preset</Label>
+          <Label className="text-xs text-muted-foreground">Download type</Label>
           {analysis && analysis.presets.length > 0 ? (
             <Select
               value={selectedPresetId}
@@ -1936,7 +2254,10 @@ function DownloadLinkCard({
                 label: item.label,
               }))}
             >
-              <SelectTrigger className="h-9 w-full bg-background">
+              <SelectTrigger
+                aria-label="Download type"
+                className="h-9 w-full bg-background"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent align="start">
@@ -1954,6 +2275,60 @@ function DownloadLinkCard({
           )}
         </div>
       </div>
+      {preset ? (
+        <div className="download-actions">
+          <div className="flex flex-wrap items-center gap-2">
+            {!running ? (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={starting || analyzing || Boolean(exportNameError)}
+                  onClick={onStart}
+                >
+                  {starting && startingProfile !== "xrbazaar" ? (
+                    <Loader2 className="animate-spin" />
+                  ) : (
+                    <Download />
+                  )}
+                  {starting && startingProfile !== "xrbazaar"
+                    ? "Starting…"
+                    : preset.pipeline === "youtube_channel_export"
+                      ? "Export all channels"
+                      : "Download original"}
+                </Button>
+                {preset.outputKind === "video" ? (
+                  <button
+                    type="button"
+                    className="xrbazaar-button"
+                    disabled={starting || analyzing}
+                    onClick={onStartXrbazaar}
+                  >
+                    {starting && startingProfile === "xrbazaar" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <span className="xrbazaar-signet" aria-hidden="true" />
+                    )}
+                    {starting && startingProfile === "xrbazaar"
+                      ? "Starting…"
+                      : "Download for XRBAZAAR"}
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <Button variant="outline" onClick={() => onCancel(job.id)}>
+                <Square />
+                Cancel download
+              </Button>
+            )}
+          </div>
+          {preset.outputKind === "video" && !running ? (
+            <span className="download-profile-note">
+              XRBAZAAR: MP4 · 1280 px · up to 30 fps · 100 MiB
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {preset ? (
         <div className="mt-4 space-y-3">
@@ -1964,6 +2339,8 @@ function DownloadLinkCard({
               onViewRun={() => preset && onViewRun(preset.id)}
             />
           ) : null}
+
+          {readyAssets.length > 0 ? <ReadyMedia assets={readyAssets} /> : null}
 
           {!running ? (
             <>
@@ -2035,24 +2412,23 @@ function DownloadLinkCard({
                 </div>
               ) : null}
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-                  <div className="text-xs text-muted-foreground">Output</div>
-                  <div className="mt-0.5 truncate">
+              <div className="download-details">
+                <span
+                  className="flex min-w-0 items-center gap-2"
+                  title={outputDir ?? "Downloads"}
+                >
+                  <FolderOpen className="size-3.5 shrink-0" />
+                  <span className="truncate">
                     {preset.pipeline === "youtube_channel_export"
                       ? `${outputDir ?? "Downloads"}/youtube_export/${exportName.trim() || "<export name>"}`
                       : (outputDir ?? "Downloads")}
-                  </div>
-                </div>
-                <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-sm">
-                  <div className="text-xs text-muted-foreground">Auth</div>
-                  <div className="mt-0.5 truncate">
-                    {authLabel(auth)}
-                    {preset.auth === "required" && !canUseAuth
-                      ? " required"
-                      : ""}
-                  </div>
-                </div>
+                  </span>
+                </span>
+                <span className="flex items-center gap-2">
+                  <Shield className="size-3.5" />
+                  {authLabel(auth)}
+                  {preset.auth === "required" && !canUseAuth ? " required" : ""}
+                </span>
               </div>
 
               {preset.pipeline !== "youtube_channel_export" ? (
@@ -2064,34 +2440,8 @@ function DownloadLinkCard({
                   onLoadFormats={onLoadFormats}
                 />
               ) : null}
-
-              <div className="flex justify-end">
-                <Button
-                  type="button"
-                  className="gap-2"
-                  disabled={analyzing || Boolean(exportNameError)}
-                  onClick={onStart}
-                >
-                  <Download className="size-4" />
-                  {preset.pipeline === "youtube_channel_export"
-                    ? "Export all channels"
-                    : "Start"}
-                </Button>
-              </div>
             </>
-          ) : (
-            <div className="flex justify-end">
-              <Button
-                type="button"
-                variant="outline"
-                className="gap-2"
-                onClick={() => onCancel(job.id)}
-              >
-                <Square className="size-3.5" />
-                Stop
-              </Button>
-            </div>
-          )}
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -2204,69 +2554,131 @@ function AdvancedDownloadPanel({
   }
 
   return (
-    <div className="rounded-md border bg-background p-3">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <SlidersHorizontal className="size-4" />
-          Advanced
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <Label className="text-xs text-muted-foreground">Streams</Label>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
-            <Checkbox
-              checked={videoEnabled}
-              disabled={videoEnabled && !audioEnabled}
-              onCheckedChange={(checked) => setVideoEnabled(Boolean(checked))}
-            />
-            <Film className="size-3.5 text-muted-foreground" />
-            Video
-          </Label>
-          <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
-            <Checkbox
-              checked={audioEnabled}
-              disabled={audioEnabled && !videoEnabled}
-              onCheckedChange={(checked) => setAudioEnabled(Boolean(checked))}
-            />
-            <Music className="size-3.5 text-muted-foreground" />
-            Audio
-          </Label>
-        </div>
-      </div>
-
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+    <details className="download-options border-t pt-4">
+      <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm font-medium">
+        <SlidersHorizontal className="size-4" />
+        Download options
+        <span className="ml-auto text-xs font-normal text-muted-foreground">
+          {!videoEnabled
+            ? "Audio only"
+            : !audioEnabled
+              ? "Video only"
+              : "Video + audio"}
+          {segment?.enabled ? " · Trimmed" : " · Full length"}
+        </span>
+        <ChevronRight className="disclosure-chevron size-4 text-muted-foreground" />
+      </summary>
+      <div className="pt-5">
         <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">Video quality</Label>
-          <Select
-            value={selectedVideoQualityValue}
-            onValueChange={setVideoQuality}
-            disabled={!videoEnabled}
-            items={videoQualityItems}
-          >
-            <SelectTrigger className="h-9 w-full bg-card">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="start">
-              {videoQualityItems.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <Label className="text-xs text-muted-foreground">Streams</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
+              <Checkbox
+                aria-label="Include video"
+                checked={videoEnabled}
+                disabled={videoEnabled && !audioEnabled}
+                onCheckedChange={(checked) => setVideoEnabled(Boolean(checked))}
+              />
+              <Film className="size-3.5 text-muted-foreground" />
+              Video
+            </Label>
+            <Label className="flex h-10 items-center gap-2 rounded-md border bg-card px-3 text-sm">
+              <Checkbox
+                aria-label="Include audio"
+                checked={audioEnabled}
+                disabled={audioEnabled && !videoEnabled}
+                onCheckedChange={(checked) => setAudioEnabled(Boolean(checked))}
+              />
+              <Music className="size-3.5 text-muted-foreground" />
+              Audio
+            </Label>
+          </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <Label className="text-xs text-muted-foreground">Format</Label>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label className="flex h-7 items-center text-xs text-muted-foreground">
+              Video quality
+            </Label>
+            <Select
+              value={selectedVideoQualityValue}
+              onValueChange={setVideoQuality}
+              disabled={!videoEnabled}
+              items={videoQualityItems}
+            >
+              <SelectTrigger
+                aria-label="Video quality"
+                className="h-9 w-full bg-card"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="start">
+                {videoQualityItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label className="text-xs text-muted-foreground">Format</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs"
+                disabled={loadingFormats || !videoEnabled}
+                onClick={onLoadFormats}
+              >
+                {loadingFormats ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3" />
+                )}
+                Load
+              </Button>
+            </div>
+            <Select
+              value={selectedQualityValue}
+              onValueChange={setQuality}
+              disabled={!videoEnabled}
+              items={exactFormatItems}
+            >
+              <SelectTrigger
+                aria-label="Stream format"
+                className="h-9 w-full bg-card"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="start">
+                {exactFormatItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        {!videoEnabled ? (
+          <div className="mt-3 text-xs text-muted-foreground">
+            Audio uses the best available audio stream.
+          </div>
+        ) : videoFormats.length === 0 ? (
+          <div className="mt-3 flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 text-xs text-muted-foreground">
+            <span>
+              Load formats to choose exact video quality and stream format.
+            </span>
             <Button
               type="button"
               variant="outline"
               size="sm"
               className="h-7 gap-1.5 px-2 text-xs"
-              disabled={loadingFormats || !videoEnabled}
+              disabled={loadingFormats}
               onClick={onLoadFormats}
             >
               {loadingFormats ? (
@@ -2274,113 +2686,70 @@ function AdvancedDownloadPanel({
               ) : (
                 <RefreshCw className="size-3" />
               )}
-              Load
+              Load formats
             </Button>
           </div>
-          <Select
-            value={selectedQualityValue}
-            onValueChange={setQuality}
-            disabled={!videoEnabled}
-            items={exactFormatItems}
-          >
-            <SelectTrigger className="h-9 w-full bg-card">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="start">
-              {exactFormatItems.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+        ) : null}
 
-      {!videoEnabled ? (
-        <div className="mt-3 text-xs text-muted-foreground">
-          Audio uses the best available audio stream.
-        </div>
-      ) : videoFormats.length === 0 ? (
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 text-xs text-muted-foreground">
-          <span>
-            Load formats to choose exact video quality and stream format.
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1.5 px-2 text-xs"
-            disabled={loadingFormats}
-            onClick={onLoadFormats}
-          >
-            {loadingFormats ? (
-              <Loader2 className="size-3 animate-spin" />
-            ) : (
-              <RefreshCw className="size-3" />
-            )}
-            Load formats
-          </Button>
-        </div>
-      ) : null}
-
-      <div className="mt-3 rounded-md border bg-card p-3">
-        <Label className="flex items-center justify-between gap-3 text-sm">
-          <span className="flex items-center gap-2 font-medium">
-            <Scissors className="size-4" />
-            Segment
-          </span>
-          <Switch
-            checked={Boolean(segment?.enabled)}
-            onCheckedChange={enableSegment}
-          />
-        </Label>
-
-        {segment?.enabled ? (
-          <div className="mt-3 space-y-3">
-            <SegmentRange
-              duration={duration ?? Math.max(segment.endSeconds ?? 60, 60)}
-              start={segment.startSeconds}
-              end={segment.endSeconds ?? duration ?? 60}
-              onChange={(startSeconds, endSeconds) =>
-                setSegment({
-                  enabled: true,
-                  startSeconds,
-                  endSeconds,
-                })
-              }
+        <div className="mt-3 rounded-md border bg-card p-3">
+          <Label className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <span className="flex items-center gap-2 font-medium">
+              <Scissors className="size-4" />
+              Trim video
+            </span>
+            <Switch
+              aria-label="Trim video"
+              checked={Boolean(segment?.enabled)}
+              onCheckedChange={enableSegment}
             />
-            <div className="grid grid-cols-2 gap-2">
-              <TimeInput
-                label="Start"
-                value={segment.startSeconds}
-                onChange={(startSeconds) =>
+          </Label>
+
+          {segment?.enabled ? (
+            <div className="mt-3 space-y-3">
+              <SegmentRange
+                duration={duration ?? Math.max(segment.endSeconds ?? 60, 60)}
+                start={segment.startSeconds}
+                end={segment.endSeconds ?? duration ?? 60}
+                onChange={(startSeconds, endSeconds) =>
                   setSegment({
                     enabled: true,
                     startSeconds,
-                    endSeconds: Math.max(
-                      startSeconds,
-                      segment.endSeconds ?? duration ?? startSeconds
-                    ),
-                  })
-                }
-              />
-              <TimeInput
-                label="End"
-                value={segment.endSeconds ?? duration ?? 60}
-                onChange={(endSeconds) =>
-                  setSegment({
-                    enabled: true,
-                    startSeconds: Math.min(segment.startSeconds, endSeconds),
                     endSeconds,
                   })
                 }
               />
+              <div className="grid grid-cols-2 gap-2">
+                <TimeInput
+                  label="Start"
+                  value={segment.startSeconds}
+                  onChange={(startSeconds) =>
+                    setSegment({
+                      enabled: true,
+                      startSeconds,
+                      endSeconds: Math.max(
+                        startSeconds,
+                        segment.endSeconds ?? duration ?? startSeconds
+                      ),
+                    })
+                  }
+                />
+                <TimeInput
+                  label="End"
+                  value={segment.endSeconds ?? duration ?? 60}
+                  onChange={(endSeconds) =>
+                    setSegment({
+                      enabled: true,
+                      startSeconds: Math.min(segment.startSeconds, endSeconds),
+                      endSeconds,
+                    })
+                  }
+                />
+              </div>
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </div>
-    </div>
+    </details>
   )
 }
 
@@ -2458,20 +2827,22 @@ function JobProgress({
 }: {
   job: Job
   onCopyLogs: () => void
-  onViewRun: () => void
+  onViewRun?: () => void
 }) {
   const done = job.status === "completed"
   const failed = job.status === "failed"
   const canceled = job.status === "canceled"
 
   return (
-    <div className="rounded-md border bg-background px-3 py-3">
-      <div className="flex items-center justify-between gap-3 text-sm">
+    <div className="job-progress">
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
         <div className="flex min-w-0 items-center gap-2">
           {done ? (
             <Check className="size-4 text-emerald-600" />
-          ) : failed || canceled ? (
+          ) : failed ? (
             <AlertCircle className="size-4 text-destructive" />
+          ) : canceled ? (
+            <Square className="size-4 text-muted-foreground" />
           ) : (
             <Loader2 className="size-4 animate-spin text-muted-foreground" />
           )}
@@ -2481,16 +2852,18 @@ function JobProgress({
           <span className="text-xs text-muted-foreground">
             {Math.round(job.progress)}%
           </span>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="gap-1.5"
-            onClick={onViewRun}
-          >
-            <List className="size-3" />
-            Run
-          </Button>
+          {onViewRun ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              className="gap-1.5"
+              onClick={onViewRun}
+            >
+              <List className="size-3" />
+              Activity
+            </Button>
+          ) : null}
           <Button
             type="button"
             size="xs"
@@ -2504,17 +2877,28 @@ function JobProgress({
           </Button>
         </div>
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+      <div
+        role="progressbar"
+        aria-label="Download progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(clamp(job.progress, 0, 100))}
+        className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"
+      >
         <div
           className={cn(
             "h-full rounded-full transition-all",
-            failed || canceled ? "bg-destructive" : "bg-foreground"
+            failed
+              ? "bg-destructive"
+              : canceled
+                ? "bg-muted-foreground"
+                : "bg-foreground"
           )}
           style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}
         />
       </div>
       <div className="mt-2 grid min-w-0 gap-1 text-xs text-muted-foreground">
-        {job.speed || job.eta ? (
+        {!done && !failed && !canceled && (job.speed || job.eta) ? (
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             {job.speed ? <span>{job.speed}</span> : null}
             {job.eta ? <span>ETA {job.eta}</span> : null}
@@ -2527,7 +2911,7 @@ function JobProgress({
         ) : null}
         {job.errorMessage ? (
           <div
-            className="min-w-0 truncate text-destructive"
+            className="min-w-0 break-words text-destructive"
             title={job.errorMessage}
           >
             {job.errorMessage}
@@ -2542,108 +2926,71 @@ function JobRunItem({
   job,
   assets,
   onCopyLogs,
+  onCancel,
 }: {
   job: Job
   assets: DownloadAsset[]
   onCopyLogs: () => void
+  onCancel: () => void
 }) {
+  const running = !["completed", "failed", "canceled"].includes(job.status)
   return (
-    <div className="rounded-lg border bg-card p-4">
-      <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-center">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium">
-            {siteLabels[job.site]} - {job.presetId}
-          </div>
-          <div className="mt-1 truncate text-xs text-muted-foreground">
+    <div className="rounded-xl border bg-card p-5">
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-medium">
+            {siteLabels[job.site]} · {humanPresetId(job.presetId)}
+          </h2>
+          <p className="mt-1 text-xs break-all text-muted-foreground">
             {job.sourceUrl}
-          </div>
+          </p>
         </div>
-        <span className="w-fit rounded border bg-muted px-2 py-1 text-xs text-muted-foreground capitalize">
-          {job.status}
-        </span>
-        <div className="flex items-center justify-end">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="gap-1.5"
-            aria-label="Copy logs"
-            onClick={onCopyLogs}
+        <div className="flex items-center gap-3">
+          <StatusBadge
+            status={job.status === "completed" ? "ready" : job.status}
           >
-            <Clipboard className="size-3" />
-            Logs
-          </Button>
+            {job.status}
+          </StatusBadge>
+          {running ? (
+            <Button size="sm" variant="outline" onClick={onCancel}>
+              <Square />
+              Cancel download
+            </Button>
+          ) : null}
         </div>
       </div>
-
-      <div className="mt-3 text-xs text-muted-foreground">{job.phase}</div>
+      <JobProgress job={job} onCopyLogs={onCopyLogs} />
       {assets.length > 0 ? (
-        <div className="mt-3">
-          <AssetCarousel assets={assets} />
+        <div className="mt-4">
+          <ReadyMedia assets={assets} />
         </div>
       ) : null}
     </div>
   )
 }
 
-function AssetCarousel({ assets }: { assets: DownloadAsset[] }) {
-  const [index, setIndex] = useState(0)
-  const safeIndex = clamp(index, 0, Math.max(assets.length - 1, 0))
-  const asset = assets[safeIndex]
-
-  if (!asset) return null
-
+function ReadyMedia({ assets }: { assets: DownloadAsset[] }) {
   return (
-    <div className="rounded-md border bg-background p-3">
-      <div className="grid gap-3 md:grid-cols-[280px_1fr]">
-        <AssetPreview path={asset.path} />
-        <div className="flex min-w-0 flex-col justify-between gap-3">
-          <div className="min-w-0">
-            <div
-              className="truncate text-sm font-medium"
-              title={fileNameFromPath(asset.path)}
-            >
-              {fileNameFromPath(asset.path)}
-            </div>
-            <div
-              className="mt-1 truncate text-xs text-muted-foreground"
-              title={asset.path}
-            >
-              {asset.path}
-            </div>
-          </div>
-          <AssetActions path={asset.path} />
-        </div>
+    <section className="ready-media" aria-label="Downloaded files">
+      <div className="ready-media-heading">
+        <span>
+          {assets.length} {assets.length === 1 ? "file" : "files"} ready
+        </span>
       </div>
-
-      {assets.length > 1 ? (
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="gap-1.5"
-            onClick={() => setIndex(Math.max(0, safeIndex - 1))}
-          >
-            <ChevronLeft className="size-3" />
-            Prev
-          </Button>
-          <div className="text-xs text-muted-foreground">
-            {safeIndex + 1} / {assets.length}
+      <div className="ready-media-grid">
+        {assets.map((asset) => (
+          <div key={asset.path} className="ready-media-item">
+            <AssetPreview path={asset.path} />
+            <div className="min-w-0 space-y-3">
+              <p className="text-sm font-medium break-words" title={asset.path}>
+                {fileNameFromPath(asset.path)}
+              </p>
+              <AssetActions key={asset.path} path={asset.path} />
+            </div>
           </div>
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="gap-1.5"
-            onClick={() => setIndex(Math.min(assets.length - 1, safeIndex + 1))}
-          >
-            Next
-            <ChevronRight className="size-3" />
-          </Button>
-        </div>
-      ) : null}
-    </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -2675,7 +3022,7 @@ function DownloadedAssetItem({
         </div>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <AssetActions path={asset.path} />
+        <AssetActions key={asset.path} path={asset.path} />
         <Button
           type="button"
           size="xs"
@@ -2692,67 +3039,187 @@ function DownloadedAssetItem({
 }
 
 function AssetPreview({ path }: { path: string }) {
-  const previewUrl = pathToPreviewUrl(path)
+  if (!isVideoPath(path)) {
+    return (
+      <div className="flex aspect-video items-center justify-center rounded-md border bg-muted">
+        <Download className="size-5 text-muted-foreground" />
+      </div>
+    )
+  }
+  return <VideoPreview key={path} path={path} />
+}
+
+function VideoPreview({ path }: { path: string }) {
+  const [source, setSource] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  useEffect(() => {
+    let canceled = false
+    prepareMediaPreview(path)
+      .then((url) => {
+        if (!canceled) setSource(url)
+      })
+      .catch((reason) => {
+        if (!canceled)
+          setError(reason instanceof Error ? reason.message : String(reason))
+      })
+    return () => {
+      canceled = true
+    }
+  }, [path, attempt])
 
   return (
-    <div className="relative aspect-video overflow-hidden rounded-md border bg-muted">
-      {previewUrl ? (
+    <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-muted">
+      {error ? (
+        <div
+          role="status"
+          className="flex max-w-sm flex-col items-center gap-3 p-4 text-center"
+        >
+          <Film className="size-6 text-muted-foreground" />
+          <p className="text-xs text-muted-foreground">{error}</p>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setError(null)
+                setSource(null)
+                setAttempt((n) => n + 1)
+              }}
+            >
+              Retry preview
+            </Button>
+            <Button
+              size="sm"
+              onClick={() =>
+                openOutputPath(path).catch((reason) => setError(String(reason)))
+              }
+            >
+              <Play />
+              Open in player
+            </Button>
+          </div>
+        </div>
+      ) : source ? (
         <video
-          src={previewUrl}
+          key={attempt}
+          src={source}
+          aria-label={`Preview of ${fileNameFromPath(path)}`}
           className="h-full w-full object-contain"
           controls
+          playsInline
           preload="metadata"
+          onError={(event) =>
+            setError(
+              event.currentTarget.error?.code === 3 ||
+                event.currentTarget.error?.code === 4
+                ? "This video format cannot play in the app. Open it in your video player."
+                : "The video could not be loaded. Retry or open it in your video player."
+            )
+          }
         />
       ) : (
-        <div className="flex h-full items-center justify-center">
-          <Download className="size-5 text-muted-foreground" />
+        <div
+          role="status"
+          className="flex items-center gap-2 text-xs text-muted-foreground"
+        >
+          <Loader2 className="size-4 animate-spin" />
+          Loading preview…
         </div>
       )}
     </div>
   )
 }
 
-function AssetActions({ path }: { path: string }) {
+function AssetActions({
+  path,
+  prominent = false,
+}: {
+  path: string
+  prominent?: boolean
+}) {
+  const [error, setError] = useState<string | null>(null)
+  const video = isVideoPath(path)
+
+  async function runAction(action: () => Promise<void>) {
+    setError(null)
+    try {
+      await action()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    }
+  }
+
   return (
-    <div className="flex flex-wrap gap-2">
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        className="gap-1.5"
-        onClick={() => revealOutputPath(path)}
-      >
-        <FolderOpen className="size-3" />
-        Show
-      </Button>
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        className="gap-1.5"
-        onClick={() => openOutputPath(path)}
-      >
-        <Play className="size-3" />
-        Open
-      </Button>
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        className="gap-1.5"
-        onClick={() => copyText(path)}
-      >
-        <Copy className="size-3" />
-        Path
-      </Button>
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size={prominent ? "sm" : "xs"}
+          variant={prominent ? "default" : "outline"}
+          className="gap-1.5"
+          onClick={() => runAction(() => openOutputPath(path))}
+        >
+          {video ? (
+            <Play className="size-3" />
+          ) : (
+            <ExternalLink className="size-3" />
+          )}
+          {video ? "Open video" : "Open file"}
+        </Button>
+        <Button
+          type="button"
+          size={prominent ? "sm" : "xs"}
+          variant="outline"
+          className="gap-1.5"
+          onClick={() => runAction(() => revealOutputPath(path))}
+        >
+          <FolderOpen className="size-3" />
+          Show in folder
+        </Button>
+        <Button
+          type="button"
+          size={prominent ? "sm" : "xs"}
+          variant="outline"
+          className="gap-1.5"
+          onClick={() => runAction(() => copyText(path))}
+        >
+          <Copy className="size-3" />
+          Copy path
+        </Button>
+      </div>
+      {error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
     </div>
   )
 }
 
-function EmptyPanel({ message }: { message: string }) {
+function EmptyPanel({
+  message,
+  title,
+  icon,
+  action,
+}: {
+  message: string
+  title?: string
+  icon?: ReactNode
+  action?: ReactNode
+}) {
   return (
-    <div className="rounded-lg border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
-      {message}
+    <div className="flex flex-col items-center rounded-xl border bg-card px-6 py-16 text-center">
+      {icon ? (
+        <div className="mb-5 flex size-12 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          {icon}
+        </div>
+      ) : null}
+      {title ? <h2 className="text-base font-medium">{title}</h2> : null}
+      <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
+        {message}
+      </p>
+      {action ? <div className="mt-6">{action}</div> : null}
     </div>
   )
 }
@@ -2927,6 +3394,8 @@ function humanPresetId(presetId: string): string {
 }
 
 function assetPathsFromJob(job: Job, logs: JobLog[] = []): string[] {
+  if (job.readyPaths) return job.readyPaths
+  if (job.status !== "completed") return []
   return uniqueStrings(
     [
       job.outputPath ?? "",
@@ -2951,6 +3420,10 @@ function parseOutputPathFromLog(message: string): string | null {
 
 function fileNameFromPath(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
+}
+
+function isVideoPath(path: string): boolean {
+  return /\.(mp4|m4v|mov|webm|mkv)$/i.test(path)
 }
 
 function advancedKey(url: string, presetId: string): string {
@@ -3117,15 +3590,6 @@ function looksLikeUrl(input: string): boolean {
 
 async function copyText(text: string) {
   await writeClipboardText(text)
-}
-
-function pathToPreviewUrl(path: string): string | null {
-  if (!isLikelyVideoPath(path)) return null
-  return localFilePreviewUrl(path)
-}
-
-function isLikelyVideoPath(path: string): boolean {
-  return /\.(mp4|m4v|mov|webm|mkv)$/i.test(path)
 }
 
 function upsertJob(jobs: Job[], next: Job): Job[] {

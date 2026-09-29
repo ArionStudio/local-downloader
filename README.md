@@ -2,6 +2,22 @@
 
 Local desktop downloader app built with Tauri, React, Vite, TypeScript, and shadcn/ui Base UI.
 
+## Command line and agents
+
+A headless `downloader-cli` uses the same download, browser-cookie, catalogue, and XRBAZAAR preparation engine. It runs without the desktop app or a display server and returns JSON for agent integrations.
+
+**Give your agent [the CLI integration guide](docs/cli.md#agent-setup-checklist).** It includes installation from this branch, browser cookies and profiles, all download options, JSON schemas and progress events, cancellation, and the AdminHub upload handoff. A dependency-free [Node adapter](examples/adminhub-downloader.mjs) is included.
+
+After [building and installing the CLI](docs/cli.md#build-and-install):
+
+```bash
+downloader-cli tools install all
+downloader-cli schema
+downloader-cli download 'VIDEO_URL' --browser firefox --profile xrbazaar --events
+```
+
+CLI source and documentation are available on `t3code/improve-user-interface`; existing desktop release assets do not include a standalone CLI binary.
+
 ## Development
 
 ```bash

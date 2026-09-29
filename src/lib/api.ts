@@ -22,6 +22,7 @@ import type {
   Settings,
   StartDownloadRequest,
   ToolUpdate,
+  ToolPlatform,
   YoutubeApiKeyInfo,
 } from "@/lib/types"
 
@@ -34,13 +35,15 @@ export async function analyzeUrl(url: string): Promise<AnalyzeResult> {
 
 export async function analyzeFormats(
   url: string,
-  auth?: AuthSource,
+  auth?: AuthSource
 ): Promise<FormatAnalysis> {
   if (!isTauri()) return { title: null, duration: null, formats: [] }
   return invoke("analyze_formats", { input: { url, auth } })
 }
 
-export async function startDownload(request: StartDownloadRequest): Promise<Job> {
+export async function startDownload(
+  request: StartDownloadRequest
+): Promise<Job> {
   if (!isTauri()) return createFallbackJob(request)
   return invoke("start_download", { input: request })
 }
@@ -56,7 +59,8 @@ export async function listJobs(): Promise<Job[]> {
 }
 
 export async function getJob(jobId: string): Promise<JobDetail> {
-  if (!isTauri()) throw new Error("Job details are available in the desktop app.")
+  if (!isTauri())
+    throw new Error("Job details are available in the desktop app.")
   return invoke("get_job", { input: { jobId } })
 }
 
@@ -76,7 +80,9 @@ export async function revealOutputPath(path: string): Promise<void> {
   return invoke("reveal_output_path", { input: { path } })
 }
 
-export async function createVideoThumbnail(path: string): Promise<string | null> {
+export async function createVideoThumbnail(
+  path: string
+): Promise<string | null> {
   if (!isTauri()) return null
   return invoke("create_video_thumbnail", { input: { path } })
 }
@@ -108,7 +114,20 @@ export async function checkToolUpdates(): Promise<ToolUpdate[]> {
   return invoke("check_tool_updates")
 }
 
-export async function installToolUpdate(tool: ToolUpdate["tool"]): Promise<void> {
+export async function getToolPlatform(): Promise<ToolPlatform | null> {
+  if (!isTauri()) return null
+  return invoke("get_tool_platform")
+}
+
+export async function prepareMediaPreview(path: string): Promise<string> {
+  if (!isTauri())
+    throw new Error("Open the desktop app to preview local videos.")
+  return invoke("prepare_media_preview", { path })
+}
+
+export async function installToolUpdate(
+  tool: ToolUpdate["tool"]
+): Promise<void> {
   if (!isTauri()) return
   return invoke("install_tool_update", { input: { tool } })
 }
@@ -118,7 +137,9 @@ export async function getSettings(): Promise<Settings> {
   return invoke("get_settings")
 }
 
-export async function updateSettings(input: Partial<Settings>): Promise<Settings> {
+export async function updateSettings(
+  input: Partial<Settings>
+): Promise<Settings> {
   if (!isTauri()) return { ...defaultSettings, ...input }
   const current = await getSettings()
   return invoke("update_settings", { input: { ...current, ...input } })
@@ -133,7 +154,9 @@ export async function addYoutubeApiKey(
   apiKey: string
 ): Promise<YoutubeApiKeyInfo[]> {
   if (!isTauri()) {
-    throw new Error("Secure credential storage is available in the desktop app.")
+    throw new Error(
+      "Secure credential storage is available in the desktop app."
+    )
   }
   return invoke("add_youtube_api_key", { input: { apiKey } })
 }
@@ -142,7 +165,9 @@ export async function removeYoutubeApiKey(
   id: string
 ): Promise<YoutubeApiKeyInfo[]> {
   if (!isTauri()) {
-    throw new Error("Secure credential storage is available in the desktop app.")
+    throw new Error(
+      "Secure credential storage is available in the desktop app."
+    )
   }
   return invoke("remove_youtube_api_key", { input: { id } })
 }
@@ -158,10 +183,12 @@ export async function writeClipboardText(text: string): Promise<void> {
 }
 
 export function onDownloadJobEvent(
-  callback: (event: DownloadJobEvent) => void,
+  callback: (event: DownloadJobEvent) => void
 ): Promise<() => void> {
   if (!isTauri()) return Promise.resolve(() => undefined)
-  return listen<DownloadJobEvent>("download:job-event", (event) => callback(event.payload))
+  return listen<DownloadJobEvent>("download:job-event", (event) =>
+    callback(event.payload)
+  )
 }
 
 export function localFilePreviewUrl(path: string): string {

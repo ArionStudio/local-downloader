@@ -82,6 +82,7 @@ export type Job = {
   presetId: string
   sourceUrl: string
   outputPath?: string | null
+  readyPaths?: string[]
   progress: number
   phase: string
   speed?: string | null
@@ -101,7 +102,10 @@ export type JobLog = {
   message: string
 }
 
+export type OutputProfile = "original" | "xrbazaar"
+
 export type StartDownloadRequest = {
+  outputProfile?: OutputProfile
   url: string
   channelUrls?: string[]
   youtubeCatalogueContent?: YoutubeCatalogueContent
@@ -171,6 +175,13 @@ export type ToolUpdate = {
   availableVersion?: string | null
   path?: string | null
   message: string
+}
+
+export type ToolPlatform = {
+  os: string
+  arch: string
+  ytDlpAsset: string | null
+  ffmpegAsset: string | null
 }
 
 export type YoutubeApiKeyInfo = {
