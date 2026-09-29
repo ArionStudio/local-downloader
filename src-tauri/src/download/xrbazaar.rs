@@ -372,19 +372,20 @@ fn prepare_with_limit(
     let out_video = video(&info)?;
     let (ow, oh) = dimensions(out_video)?;
     let size = fs::metadata(&output).map_err(|e| e.to_string())?.len();
-    if !compatible(&info)
-        || size > limit
-        || !fast_start(&output)?
-        || audio(&input).is_some() != audio(&info).is_some()
-        || ow > iw + 0.01
-        || oh > ih + 0.01
-        || ((ow / oh) / (iw / ih) - 1.0).abs() > 2.0 / w as f64 + 2.0 / h as f64
-        || number(&info["format"]["duration"])
-            .is_none_or(|out| (out - duration).abs() > 0.5f64.max(duration * 0.01))
-    {
-        return Err(
-            "The converted video did not pass XRBAZAAR verification. The source was kept.".into(),
-        );
+    let checks = [
+        (!compatible(&info), format!("stream requirements: video {} / {}, {ow}x{oh}, average FPS {}, nominal FPS {}; audio {}",
+            out_video["codec_name"], out_video["pix_fmt"], out_video["avg_frame_rate"], out_video["r_frame_rate"],
+            audio(&info).map(|a| format!("{} / {} Hz / {} channels / {} bps", a["codec_name"], a["sample_rate"], a["channels"], a["bit_rate"])).unwrap_or_else(|| "none".into()))),
+        (size > limit, format!("file is {size} bytes, limit is {limit}")),
+        (!fast_start(&output)?, "fast-start metadata is missing".into()),
+        (audio(&input).is_some() != audio(&info).is_some(), "audio was not preserved".into()),
+        (ow > iw + 0.01 || oh > ih + 0.01, "video was upscaled".into()),
+        (((ow / oh) / (iw / ih) - 1.0).abs() > 2.0 / w as f64 + 2.0 / h as f64, "aspect ratio changed".into()),
+        (number(&info["format"]["duration"]).is_none_or(|out| (out - duration).abs() > 0.5f64.max(duration * 0.01)), "duration changed".into()),
+    ];
+    let failures: Vec<_> = checks.into_iter().filter_map(|(failed, reason)| failed.then_some(reason)).collect();
+    if !failures.is_empty() {
+        return Err(format!("The converted video did not pass XRBAZAAR verification: {}. The source was kept.", failures.join("; ")));
     }
     run.run(
         Command::new(ffmpeg)
