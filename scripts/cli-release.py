@@ -94,7 +94,7 @@ def main():
             shutil.unpack_archive(archive, extracted)
             verify(extracted / name, target)
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-            (dist / f'{archive.name}.sha256').write_text(f'{digest}  {archive.name}\n')
+            (dist / f'{archive.name}.sha256').write_text(f'{digest}  {archive.name}\n', newline='\n')
             print(f'Packaged and verified {archive.name}', flush=True)
     else:
         raise ValueError(operation)

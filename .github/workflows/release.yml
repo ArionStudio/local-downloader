@@ -164,7 +164,12 @@ jobs:
           for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
             extension=tar.gz
             if [[ "$target" == *windows* ]]; then extension=zip; fi
-            sha256sum -c "downloader-cli-$version-$target.$extension.sha256"
+            checksum="downloader-cli-$version-$target.$extension.sha256"
+            # Accept Windows-produced checksum manifests without treating CR
+            # as part of the archive filename. Uploaded manifests use LF.
+            tr -d '\r' < "$checksum" > "$checksum.normalized"
+            mv "$checksum.normalized" "$checksum"
+            sha256sum -c "$checksum"
           done
           cat ./*.sha256 > SHA256SUMS
           gh release upload "$tag" ./*.tar.gz ./*.zip ./*.sha256 SHA256SUMS \
