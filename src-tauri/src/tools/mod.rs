@@ -1,6 +1,5 @@
 use crate::runtime::Runtime;
 use sha2::{Digest, Sha256};
-use ureq::ResponseExt;
 use std::{
     env,
     fs::{self, File},
@@ -168,12 +167,14 @@ struct FfmpegAsset {
 }
 
 fn mac_ffmpeg_base(arch: &str) -> Result<String, String> {
-    let architecture = match arch {
-        "aarch64" => "arm64",
-        "x86_64" => "amd64",
+    // Pin a matched FFmpeg/ffprobe release. The provider's Intel 'latest'
+    // redirect can return 404 even while its versioned release is available.
+    let release = match arch {
+        "aarch64" => "arm64/1789931890_9.0.2",
+        "x86_64" => "amd64/1789931006_9.0.2",
         _ => return Err(format!("FFmpeg does not support macOS {arch}.")),
     };
-    Ok(format!("https://ffmpeg.martin-riedl.de/redirect/latest/macos/{architecture}/release"))
+    Ok(format!("https://ffmpeg.martin-riedl.de/download/macos/{release}"))
 }
 
 fn install_yt_dlp(app: &Runtime) -> Result<(), String> {
@@ -207,11 +208,7 @@ fn install_ffmpeg(app: &Runtime) -> Result<(), String> {
     let result = (|| {
         fs::create_dir_all(&extract_dir).map_err(|error| error.to_string())?;
         if env::consts::OS == "macos" {
-            // Resolve once so FFmpeg, ffprobe, and their checksums share a release.
-            let response = ureq::head(&asset.url).header("User-Agent", USER_AGENT)
-                .call().map_err(|error| format!("Could not resolve FFmpeg release: {error}"))?;
-            let resolved = response.get_uri().to_string();
-            let base = resolved.rsplit_once('/').ok_or("Invalid FFmpeg release URL")?.0;
+            let base = mac_ffmpeg_base(env::consts::ARCH)?;
             for tool in ["ffmpeg", "ffprobe"] {
                 let name = format!("{tool}.zip");
                 let url = format!("{base}/{name}");
@@ -621,7 +618,8 @@ mod tests {
     fn macos_and_windows_ffmpeg_use_native_archives() {
         for (arch, expected) in [("aarch64", "arm64"), ("x86_64", "amd64")] {
             let asset = ffmpeg_asset_for("macos", arch).unwrap();
-            assert!(asset.url.contains(&format!("/macos/{expected}/release/")));
+            assert!(asset.url.contains(&format!("/download/macos/{expected}/")));
+            assert!(asset.url.contains("_9.0.2/"));
             assert!(asset.url.ends_with("/ffmpeg.zip"));
         }
         assert_eq!(ffmpeg_asset_for("windows", "x86_64").unwrap().name,
