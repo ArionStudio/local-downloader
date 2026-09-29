@@ -33,7 +33,7 @@ jobs:
             target: x86_64-pc-windows-msvc
     env:
       MACOSX_DEPLOYMENT_TARGET: '11.0'
-      DOWNLOADER_DATA_DIR: ${{ runner.temp }}/downloader-release-state
+      DOWNLOADER_DATA_DIR: ${{ github.workspace }}/.cli-release-state
     steps:
       - uses: actions/checkout@v4
       - name: Linux build dependencies
