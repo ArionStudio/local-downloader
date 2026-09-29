@@ -50,6 +50,7 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
           key: cli-${{ matrix.target }}
+          cache-on-failure: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

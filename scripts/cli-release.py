@@ -16,7 +16,12 @@ VERSION = json.loads((ROOT / 'package.json').read_text())['version']
 
 
 def run(*args):
-    return subprocess.check_output([str(arg) for arg in args], text=True).strip()
+    completed = subprocess.run([str(arg) for arg in args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if completed.returncode:
+        print(completed.stdout, file=sys.stderr, flush=True)
+        print(completed.stderr, file=sys.stderr, flush=True)
+        completed.check_returncode()
+    return completed.stdout.strip()
 
 
 def result(binary, *args):
