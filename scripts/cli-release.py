@@ -71,7 +71,7 @@ def main():
             stage = Path(temporary) / 'stage'
             stage.mkdir()
             shutil.copy2(binary, stage / name)
-            for source in ['docs/cli.md', 'examples/adminhub-downloader.mjs']:
+            for source in ['CHANGELOG.md', 'docs/cli.md', 'examples/adminhub-downloader.mjs']:
                 destination = stage / source
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / source, destination)
@@ -93,6 +93,8 @@ def main():
             extracted = Path(temporary) / 'extracted'
             shutil.unpack_archive(archive, extracted)
             verify(extracted / name, target)
+            for document in ['CHANGELOG.md', 'docs/cli.md', 'examples/adminhub-downloader.mjs']:
+                assert (extracted / document).read_bytes() == (ROOT / document).read_bytes()
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
             (dist / f'{archive.name}.sha256').write_text(f'{digest}  {archive.name}\n', newline='\n')
             print(f'Packaged and verified {archive.name}', flush=True)

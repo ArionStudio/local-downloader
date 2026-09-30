@@ -39,11 +39,11 @@ Do not tell users to disable Gatekeeper globally or run `xattr -cr` as the norma
 
 ## Publish a Release
 
-Increment the version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the downloader entry in `src-tauri/Cargo.lock`. Add release notes at `docs/releases/<version>.md`, update the pinned download links in `docs/cli.md`, commit, and push the matching tag. For example, version `0.1.20` uses:
+Increment the version in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the downloader entry in `src-tauri/Cargo.lock`. Add release notes at `docs/releases/<version>.md`, update the pinned download links in `docs/cli.md`, commit, and push the matching tag. For example, version `0.1.21` uses:
 
 ```bash
-git tag app-v0.1.20
-git push origin app-v0.1.20
+git tag app-v0.1.21
+git push origin app-v0.1.21
 ```
 
 Only after every desktop and CLI platform succeeds does the workflow upload all CLI archives, checksums, the guide, and adapter, then publish the draft release with the version's release notes.

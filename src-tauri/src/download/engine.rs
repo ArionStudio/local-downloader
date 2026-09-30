@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -1004,6 +1004,10 @@ fn run_yt_dlp_attempt(
     cancel_flag: &Arc<AtomicBool>,
     phase: &str,
 ) -> Result<AttemptOutcome, String> {
+    let video_only = matches!(
+        input.advanced.as_ref().map(|advanced| &advanced.format),
+        Some(FormatSelection::VideoOnly { .. })
+    );
     let args = build_yt_dlp_args(input, preset, ffmpeg_location);
     update_phase(app, state, job_id, JobStatus::Downloading, 5.0, phase)?;
     let mut attempt_logs = Vec::new();
@@ -1036,8 +1040,10 @@ fn run_yt_dlp_attempt(
                 let line = ProcessLine::Stdout(line);
                 // Publish originals even while the worker prepares an earlier
                 // video for XRBAZAAR. The worker retries any publication error.
-                if let Some(path) = ready_path_from_line(&line) {
-                    let _ = publish_ready_file(&app, &state, &job_id, &path);
+                if !video_only {
+                    if let Some(path) = ready_path_from_line(&line) {
+                        let _ = publish_ready_file(&app, &state, &job_id, &path);
+                    }
                 }
                 let _ = sender.send(line);
             }
@@ -1058,6 +1064,22 @@ fn run_yt_dlp_attempt(
     let mut file_ready = |path: &str| -> Result<(), String> {
         if !prepared.insert(path.to_string()) {
             return Ok(());
+        }
+        if video_only {
+            let ffmpeg = tools::find_tool(app, "ffmpeg")
+                .ok_or("FFmpeg is required to remove audio for video-only downloads.")?;
+            update_phase(
+                app,
+                state,
+                job_id,
+                JobStatus::Postprocessing,
+                95.0,
+                "Removing audio",
+            )?;
+            let result = remove_video_audio(&ffmpeg, Path::new(path), cancel_flag, &mut |pid| {
+                state.set_process(job_id, pid.unwrap_or(download_pid))
+            });
+            result?;
         }
         publish_ready_file(app, state, job_id, path)?;
         if input.output_profile == super::OutputProfile::Xrbazaar {
@@ -1174,6 +1196,69 @@ fn run_yt_dlp_attempt(
         }
     }
     result
+}
+
+// Format selectors can fall back to a combined video/audio file. Remux before
+// announcing readiness so "video only" also works for direct MP4 sources.
+fn remove_video_audio(
+    ffmpeg: &Path,
+    path: &Path,
+    cancel: &AtomicBool,
+    process: &mut dyn FnMut(Option<u32>) -> Result<(), String>,
+) -> Result<(), String> {
+    struct TemporaryFile(PathBuf);
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Canceled".into());
+    }
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+    let temporary = TemporaryFile(path.with_file_name(format!(
+        ".video-only-{}.part.{extension}",
+        uuid::Uuid::new_v4()
+    )));
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-nostdin", "-v", "error", "-n", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-c:v", "copy", "-an"])
+        .arg(&temporary.0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    process_control::isolate_process_group(&mut command);
+    let mut child = process_control::ChildGuard(command.spawn().map_err(|e| e.to_string())?);
+    process(Some(child.id()))?;
+    let stderr = child.stderr.take().unwrap();
+    let reader = thread::spawn(move || {
+        let mut message = String::new();
+        let _ = stderr.take(64 * 1024).read_to_string(&mut message);
+        message
+    });
+    let result = (|| loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("Canceled".into());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Removing audio failed ({status})"))
+            };
+        }
+        thread::sleep(Duration::from_millis(100));
+    })();
+    // Reap before joining the pipe reader, including cancellation and failures.
+    drop(child);
+    let errors = reader.join().unwrap_or_default();
+    process(None)?;
+    result.map_err(|e| format!("{e}: {}", redaction::sanitize_log_line(errors.trim())))?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Canceled".into());
+    }
+    fs::rename(&temporary.0, path).map_err(|e| format!("Could not save video without audio: {e}"))
 }
 
 fn drain_process_lines(
@@ -3062,7 +3147,14 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
 }
 
 fn yt_dlp_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<String> {
-    browser_cookie_failure_hint_from_messages(messages)
+    browser_cookie_failure_hint_from_messages(messages).or_else(|| {
+        messages.iter().rev().find_map(|message| {
+            let line = message.as_ref().trim();
+            line.strip_prefix("ERROR:")
+                .map(|reason| redaction::sanitize_log_line(reason.trim()))
+                .filter(|reason| !reason.is_empty())
+        })
+    })
 }
 
 fn is_generic_yt_dlp_exit_error(error: &str) -> bool {
@@ -3474,6 +3566,16 @@ mod tests {
 
         assert!(hint.contains("Could not import browser cookies from chrome"));
         assert!(hint.contains("desktop keyring"));
+    }
+
+    #[test]
+    fn preserves_source_failure_reason() {
+        let messages = ["WARNING: Retrying", "ERROR: [vimeo] This video requires login"];
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&messages).as_deref(),
+            Some("[vimeo] This video requires login")
+        );
+        assert!(yt_dlp_failure_hint_from_messages(&["Downloading", "ERROR: "]).is_none());
     }
 
     #[test]

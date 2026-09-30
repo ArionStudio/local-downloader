@@ -4,15 +4,15 @@
 
 ## Download and install
 
-Download a standalone binary from [GitHub Releases](https://github.com/ArionStudio/local-downloader/releases/latest). No Rust, Node, source checkout, or desktop app is required. The following links and commands pin **0.1.20**, so your agent can reproduce its installation.
+Download a standalone binary from [GitHub Releases](https://github.com/ArionStudio/local-downloader/releases/latest). No Rust, Node, source checkout, or desktop app is required. The following links and commands pin **0.1.21**, so your agent can reproduce its installation.
 
 | Machine | Release archive |
 | --- | --- |
-| macOS Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.20/downloader-cli-0.1.20-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [x86_64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.20/downloader-cli-0.1.20-x86_64-apple-darwin.tar.gz) |
-| Linux x64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.20/downloader-cli-0.1.20-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.20/downloader-cli-0.1.20-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [x86_64-pc-windows-msvc.zip](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.20/downloader-cli-0.1.20-x86_64-pc-windows-msvc.zip) |
+| macOS Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.21/downloader-cli-0.1.21-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [x86_64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.21/downloader-cli-0.1.21-x86_64-apple-darwin.tar.gz) |
+| Linux x64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.21/downloader-cli-0.1.21-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.21/downloader-cli-0.1.21-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [x86_64-pc-windows-msvc.zip](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.21/downloader-cli-0.1.21-x86_64-pc-windows-msvc.zip) |
 
 Use macOS 14 or newer, Linux with glibc 2.35 or newer, or Windows 10/11 x64. Linux needs the D-Bus runtime library, typically already installed on desktops (`libdbus-1-3` on Debian/Ubuntu). Alpine/musl and Windows ARM64 native binaries are not included. macOS builds are native for each CPU; Apple Silicon does not need Rosetta.
 
@@ -23,7 +23,7 @@ Run this in Terminal. It detects your OS and CPU, downloads the matching archive
 ```bash
 (
   set -eu
-  version=0.1.20
+  version=0.1.21
   case "$(uname -s)" in
     Darwin) platform=apple-darwin ;;
     Linux) platform=unknown-linux-gnu ;;
@@ -70,7 +70,7 @@ Run in PowerShell:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$version = '0.1.20'
+$version = '0.1.21'
 $asset = "downloader-cli-$version-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/ArionStudio/local-downloader/releases/download/app-v$version"
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
@@ -109,15 +109,68 @@ Browser cookies must be accessible to the OS account running the CLI. An SSH ses
 
 Give your agent this guide and the following task:
 
-> Integrate `downloader-cli` using the standalone binary from this repository's GitHub release `app-v0.1.20`. Detect the machine's OS and CPU, download the matching CLI archive, verify its SHA-256 checksum, and install the executable. Do not build from source. Run `tools install all`, then discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client.
+> Integrate `downloader-cli` using the standalone binary from this repository's GitHub release `app-v0.1.21`. Detect the machine's OS and CPU, download the matching CLI archive, verify its SHA-256 checksum, and install the executable. Do not build from source. Run `tools install all`, then discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client. Read `CHANGELOG.md` at the repository/archive root before upgrading, and implement the update policy and user-requested update flow in this guide.
 
 1. Run `--version`, `tools platform`, and `tools status`; install missing tools with `tools install all`.
 2. Choose a persistent private CLI data directory with `DOWNLOADER_DATA_DIR`. Each concurrently running batch needs its own directory.
 3. Read `schema` and `presets`. Select browser cookies, a cookie file, or explicit no-cookie mode for each request.
 4. Try one selected video, check the returned file exists, and verify its metadata before connecting the upload step.
 5. Handle progress, timeout, cancellation, and partial success as described below. Keep the returned originals and source URLs in the agent's research record.
+6. Read the repository-root [CHANGELOG.md](../CHANGELOG.md). It is also at `CHANGELOG.md` in each extracted CLI archive and is a separate GitHub release asset. Follow [Updates for agents](#updates-for-agents); support requests such as “check for Downloader updates” and “update Downloader to the latest stable release.”
 
 No Node runtime is required for direct CLI integration. The optional adapter below uses Node built-ins; it has no npm dependencies.
+
+## Updates for agents
+
+The agent updates the installed **Downloader CLI**, not its own agent software. The CLI has no built-in self-update command. Replace its standalone executable using verified GitHub release assets. Desktop updates are separate and can be installed through **Settings → App update**.
+
+### When to check and update
+
+- On initial integration, record `downloader-cli --version`, the executable path, the release tag, and its checksum.
+- On “check for updates,” compare the installed version with the latest stable release and summarize the relevant `CHANGELOG.md` entries. This request only checks; it does not replace the binary.
+- On “update Downloader” or a request for a specific release, carry out the upgrade below. That request authorizes the update; do not ask for the same permission again.
+- Keep routine runs pinned to the recorded version. Do not silently replace a running download process. If the user has explicitly enabled automatic updates, check at agent startup or before a new batch, at most once per day, and apply a verified stable update while idle.
+- If a download fails, inspect the actual source/tool error first. Check release notes for a matching fix; do not repeatedly upgrade or retry as a substitute for authentication.
+
+### Find the release and changelog
+
+The public GitHub endpoint returns `tag_name`, `draft`, `prerelease`, `html_url`, and `assets` with exact names and download URLs:
+
+```sh
+curl --fail --silent --show-error \
+  https://api.github.com/repos/ArionStudio/local-downloader/releases/latest
+```
+
+PowerShell equivalent:
+
+```powershell
+$release = Invoke-RestMethod 'https://api.github.com/repos/ArionStudio/local-downloader/releases/latest'
+$release.tag_name
+$release.html_url
+```
+
+Parse the JSON rather than executing it. Require a stable `app-vMAJOR.MINOR.PATCH` tag and compare numeric version components. Read `CHANGELOG.md` from the matching release asset or tagged repository revision. If the installed version is already current, report that and leave it installed. An offline check or GitHub rate limit should retain the working version and report that the check could not complete.
+
+### Apply an authorized update
+
+1. Wait until this CLI installation has no active batch. Record the current binary path and version. Keep a copy of the old executable for rollback; preserve the CLI state directory, browser profiles, cookie files, and downloads.
+2. Select the matching OS/CPU archive from the release's `assets`. Use the same detection as [Download and install](#download-and-install), including Apple Silicon detection under Rosetta. Pin the selected tag for the entire update so metadata and checksums cannot refer to different releases.
+3. Download the archive and its matching `.sha256` file to a temporary directory. Verify the checksum before extracting or running the new binary. Use the commands above with `version` set to the selected release number.
+4. Before replacement, run the extracted binary with `--version`, `tools platform`, and `schema` using a temporary `--data-dir`. Require the expected version, machine architecture, and supported `schemaVersion`. On macOS, also run `codesign --verify --strict ./downloader-cli`.
+5. Replace only the agent's configured executable. On macOS/Linux, install to a temporary sibling such as `downloader-cli.new`, then rename it over the old executable while idle. On Windows, stop processes using that executable before replacing it. Keep the extracted `CHANGELOG.md`, `docs/cli.md`, and adapter alongside the agent's integration materials.
+6. Run the installed binary with `--version`, `schema`, and `tools status`. Install missing tools with `tools install all`; tool updates are separate from CLI replacement. Perform a small authorized download or preparation check, then report the old/new versions, release link, changelog changes, and check results.
+7. If verification fails, restore the previous executable and report the failed check. Do not delete state, cookies, or output files. For a release that documents a state migration, follow its migration/rollback instructions before attempting a binary downgrade.
+
+Example staging check on macOS/Linux, from the extracted archive:
+
+```sh
+check_state="$(mktemp -d)"
+./downloader-cli --version
+./downloader-cli --data-dir "$check_state" tools platform
+./downloader-cli --data-dir "$check_state" schema
+```
+
+This is the same flow for a user-requested update and an explicitly enabled automatic update. Never source scripts from release notes or disable OS security controls to make an update pass.
 
 ## Downloads
 

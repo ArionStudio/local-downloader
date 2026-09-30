@@ -59,7 +59,7 @@ jobs:
       - name: Verify native executable and install its tools
         run: python scripts/cli-release.py verify ${{ matrix.target }}
       - name: Test real downloads, cookies, preparation, and cancellation
-        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --no-default-features --target ${{ matrix.target }} -- --include-ignored
+        run: cargo test --release --locked --manifest-path src-tauri/Cargo.toml --no-default-features --target ${{ matrix.target }} -- --include-ignored --test-threads=1
       - name: Package and verify extracted CLI
         run: python scripts/cli-release.py package ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
