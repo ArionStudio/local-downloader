@@ -1,6 +1,6 @@
 [package]
 name = "downloader"
-version = "0.1.21"
+version = "0.1.22"
 description = "Download videos and media assets."
 authors = ["you"]
 license = ""

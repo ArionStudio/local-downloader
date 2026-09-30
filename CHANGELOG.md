@@ -2,8 +2,9 @@
 
 Changes are listed newest first. Desktop and standalone CLI releases share the `app-vVERSION` tag. Installation, agent integration, and update instructions are in [docs/cli.md](docs/cli.md#updates-for-agents).
 
-## 0.1.21 — 2026-09-30
+## 0.1.22 — 2026-09-30
 
+- Fix HTTPS trimming on macOS by supplying the system certificate bundle to FFmpeg without disabling TLS verification.
 - Show thumbnail posters before video playback and load previews as they become visible.
 - Start preview audio at 10%; share volume and mute across videos and remember them after restart. Add Settings → Preview audio.
 - Remove audio from video-only downloads when the source contains combined video/audio streams. Announce readiness after processing.
@@ -11,7 +12,7 @@ Changes are listed newest first. Desktop and standalone CLI releases share the `
 - Add native Mac verification and a regression test for video-only output. Run subprocess integration tests sequentially with bounded cancellation timeouts.
 - Include this changelog in every standalone CLI archive and as a release asset. Document agent update checks, user-requested updates, verification, and rollback.
 
-[Release assets and notes](https://github.com/ArionStudio/local-downloader/releases/tag/app-v0.1.21) · [Mac verification](docs/verification/macos-0.1.21.md)
+[Release assets and notes](https://github.com/ArionStudio/local-downloader/releases/tag/app-v0.1.22) · [Mac verification](docs/verification/macos-0.1.22.md)
 
 ## 0.1.20 — 2026-09-29
 

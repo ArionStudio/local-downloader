@@ -1013,6 +1013,7 @@ fn run_yt_dlp_attempt(
     let mut attempt_logs = Vec::new();
 
     let mut command = Command::new(yt_dlp);
+    configure_media_certificates(&mut command);
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -1196,6 +1197,18 @@ fn run_yt_dlp_attempt(
         }
     }
     result
+}
+
+// Standalone macOS FFmpeg builds use OpenSSL but may retain their build
+// machine's CA path. Give child FFmpeg processes the macOS trust bundle while
+// preserving an explicitly configured certificate file.
+fn configure_media_certificates(command: &mut Command) {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("SSL_CERT_FILE").is_none() && Path::new("/etc/ssl/cert.pem").is_file() {
+        command.env("SSL_CERT_FILE", "/etc/ssl/cert.pem");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = command;
 }
 
 // Format selectors can fall back to a combined video/audio file. Remux before
@@ -3568,9 +3581,30 @@ mod tests {
         assert!(hint.contains("desktop keyring"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_media_command_uses_system_certificates_without_changing_global_environment() {
+        let original = std::env::var_os("SSL_CERT_FILE");
+        let mut command = Command::new("yt-dlp");
+        configure_media_certificates(&mut command);
+        let configured = command.get_envs().find(|(key, _)| *key == "SSL_CERT_FILE");
+        if original.is_none() && Path::new("/etc/ssl/cert.pem").is_file() {
+            assert_eq!(configured.unwrap().1.unwrap(), "/etc/ssl/cert.pem");
+        } else {
+            assert!(
+                configured.is_none(),
+                "Explicit certificate settings must be inherited"
+            );
+        }
+        assert_eq!(std::env::var_os("SSL_CERT_FILE"), original);
+    }
+
     #[test]
     fn preserves_source_failure_reason() {
-        let messages = ["WARNING: Retrying", "ERROR: [vimeo] This video requires login"];
+        let messages = [
+            "WARNING: Retrying",
+            "ERROR: [vimeo] This video requires login",
+        ];
         assert_eq!(
             yt_dlp_failure_hint_from_messages(&messages).as_deref(),
             Some("[vimeo] This video requires login")
