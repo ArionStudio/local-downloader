@@ -2,6 +2,13 @@
 
 Changes are listed newest first. Desktop and standalone CLI releases share the `app-vVERSION` tag. Installation, agent integration, and update instructions are in [docs/cli.md](docs/cli.md#updates-for-agents).
 
+## 0.1.23 — 2026-10-17
+
+- Route Instagram posts and Reels through the dedicated extractor, returning one best rendition per video while preserving source audio and distinct carousel videos.
+- Preserve source failures separately from unavailable browser-cookie fallbacks, including missing profiles and Chrome export diagnostics.
+- Document unattended upgrades to an approved service pin, reuse of matching installations, and a 24-hour cooldown after a failed update.
+- Retain all fixes shipped in 0.1.22, including macOS certificate handling and video-only output.
+
 ## 0.1.22 — 2026-09-30
 
 - Fix HTTPS trimming on macOS by supplying the system certificate bundle to FFmpeg without disabling TLS verification.

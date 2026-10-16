@@ -4,15 +4,15 @@
 
 ## Download and install
 
-Download a standalone binary from [GitHub Releases](https://github.com/ArionStudio/local-downloader/releases/latest). No Rust, Node, source checkout, or desktop app is required. The following links and commands pin **0.1.22**, so your agent can reproduce its installation.
+Download a standalone binary from [GitHub Releases](https://github.com/ArionStudio/local-downloader/releases/latest). No Rust, Node, source checkout, or desktop app is required. The following links and commands pin **0.1.23**, so your agent can reproduce its installation.
 
 | Machine | Release archive |
 | --- | --- |
-| macOS Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.22/downloader-cli-0.1.22-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [x86_64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.22/downloader-cli-0.1.22-x86_64-apple-darwin.tar.gz) |
-| Linux x64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.22/downloader-cli-0.1.22-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.22/downloader-cli-0.1.22-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [x86_64-pc-windows-msvc.zip](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.22/downloader-cli-0.1.22-x86_64-pc-windows-msvc.zip) |
+| macOS Apple Silicon | [aarch64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.23/downloader-cli-0.1.23-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [x86_64-apple-darwin.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.23/downloader-cli-0.1.23-x86_64-apple-darwin.tar.gz) |
+| Linux x64 | [x86_64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.23/downloader-cli-0.1.23-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [aarch64-unknown-linux-gnu.tar.gz](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.23/downloader-cli-0.1.23-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [x86_64-pc-windows-msvc.zip](https://github.com/ArionStudio/local-downloader/releases/download/app-v0.1.23/downloader-cli-0.1.23-x86_64-pc-windows-msvc.zip) |
 
 Use macOS 14 or newer, Linux with glibc 2.35 or newer, or Windows 10/11 x64. Linux needs the D-Bus runtime library, typically already installed on desktops (`libdbus-1-3` on Debian/Ubuntu). Alpine/musl and Windows ARM64 native binaries are not included. macOS builds are native for each CPU; Apple Silicon does not need Rosetta.
 
@@ -23,7 +23,7 @@ Run this in Terminal. It detects your OS and CPU, downloads the matching archive
 ```bash
 (
   set -eu
-  version=0.1.22
+  version=0.1.23
   case "$(uname -s)" in
     Darwin) platform=apple-darwin ;;
     Linux) platform=unknown-linux-gnu ;;
@@ -70,7 +70,7 @@ Run in PowerShell:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$version = '0.1.22'
+$version = '0.1.23'
 $asset = "downloader-cli-$version-x86_64-pc-windows-msvc.zip"
 $base = "https://github.com/ArionStudio/local-downloader/releases/download/app-v$version"
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString())
@@ -109,7 +109,7 @@ Browser cookies must be accessible to the OS account running the CLI. An SSH ses
 
 Give your agent this guide and the following task:
 
-> Integrate `downloader-cli` using the standalone binary from this repository's GitHub release `app-v0.1.22`. Detect the machine's OS and CPU, download the matching CLI archive, verify its SHA-256 checksum, and install the executable. Do not build from source. Run `tools install all`, then discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client. Read `CHANGELOG.md` at the repository/archive root before upgrading, and implement the update policy and user-requested update flow in this guide.
+> Integrate `downloader-cli` using the standalone binary from this repository's GitHub release `app-v0.1.23`. Detect the machine's OS and CPU, download the matching CLI archive, verify its SHA-256 checksum, and install the executable. Do not build from source. Run `tools install all`, then discover capabilities with `schema`, `presets`, and `--help`. Invoke the executable directly, send download requests as JSON through stdin, and parse newline-delimited events plus the final result even on nonzero exit. Configure cookie access explicitly for the account running the agent. Preserve completed files after cancellation. For AdminHub, use the included Node adapter or implement its download-then-prepare flow; upload only verified prepared files through the existing AdminHub client. Read `CHANGELOG.md` at the repository/archive root before upgrading, and implement the update policy and user-requested update flow in this guide.
 
 1. Run `--version`, `tools platform`, and `tools status`; install missing tools with `tools install all`.
 2. Choose a persistent private CLI data directory with `DOWNLOADER_DATA_DIR`. Each concurrently running batch needs its own directory.
@@ -129,6 +129,7 @@ The agent updates the installed **Downloader CLI**, not its own agent software. 
 - On initial integration, record `downloader-cli --version`, the executable path, the release tag, and its checksum.
 - On “check for updates,” compare the installed version with the latest stable release and summarize the relevant `CHANGELOG.md` entries. This request only checks; it does not replace the binary.
 - On “update Downloader” or a request for a specific release, carry out the upgrade below. That request authorizes the update; do not ask for the same permission again.
+- An authenticated service guide may approve a specific CLI version and authorize its unattended installation. Follow that narrower version pin without asking again. Compare it with the private receipt once per task; a matching existing executable requires no GitHub check, repeated diagnostics or reinstall. Stage an approved version change while idle using the verification and rollback steps below. Preserve saved authentication scope and healthy managed tools. When a working executable remains, cache a failed attempt by target version and UTC time for 24 hours; retry earlier only after an explicit update request, a changed approved target or a demonstrated repair. Keep the working version and report a blocking failure once. With no working executable, stop after one failed setup attempt; a later download task may retry setup once.
 - Keep routine runs pinned to the recorded version. Do not silently replace a running download process. If the user has explicitly enabled automatic updates, check at agent startup or before a new batch, at most once per day, and apply a verified stable update while idle.
 - If a download fails, inspect the actual source/tool error first. Check release notes for a matching fix; do not repeatedly upgrade or retry as a substitute for authentication.
 

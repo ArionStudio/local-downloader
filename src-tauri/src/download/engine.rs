@@ -400,7 +400,7 @@ fn run_download_inner(
         .logs_for_job(&job_id)
         .ok()
         .and_then(|logs| failure_hint_from_logs(&logs));
-    let auth_failure = auth_attempt_failure_summary(&attempt_errors);
+    let auth_failure = auth_attempt_failure_summary(&attempt_errors, log_hint.as_deref());
     let error = auth_failure.unwrap_or_else(|| match last_error {
         Some(error) if !is_generic_yt_dlp_exit_error(&error) => error,
         Some(error) => log_hint.unwrap_or(error),
@@ -3174,7 +3174,10 @@ fn yt_dlp_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<St
     })
 }
 
-fn auth_attempt_failure_summary(errors: &[(String, String)]) -> Option<String> {
+fn auth_attempt_failure_summary(
+    errors: &[(String, String)],
+    source_hint: Option<&str>,
+) -> Option<String> {
     if let Some(summary) = browser_cookie_failure_summary(errors) {
         return Some(summary);
     }
@@ -3186,11 +3189,27 @@ fn auth_attempt_failure_summary(errors: &[(String, String)]) -> Option<String> {
     if cookie_failures.is_empty() {
         return None;
     }
-    let (_, source_error) = errors.iter().rev().find(|(_, error)| {
-        !is_browser_cookie_failure_error(error) && !is_generic_yt_dlp_exit_error(error)
-    })?;
+    let source_error = errors
+        .iter()
+        .rev()
+        .find(|(_, error)| {
+            !is_browser_cookie_failure_error(error) && !is_generic_yt_dlp_exit_error(error)
+        })
+        .map(|(_, error)| error.as_str())
+        .or_else(|| {
+            source_hint.filter(|hint| {
+                !is_browser_cookie_failure_error(hint) && !is_generic_yt_dlp_exit_error(hint)
+            })
+        })
+        .or_else(|| {
+            errors
+                .iter()
+                .find(|(_, error)| !is_browser_cookie_failure_error(error))
+                .map(|(_, error)| error.as_str())
+        })?;
     Some(format!(
-        "{source_error} Browser-cookie fallbacks also failed: {}.",
+        "{}. Browser-cookie fallbacks also failed: {}",
+        source_error.trim_end_matches('.'),
         cookie_failures.join("; ")
     ))
 }
@@ -3363,7 +3382,10 @@ mod tests {
                 "LinkedIn Feed Update preset",
             ),
         ] {
-            assert!(yt_dlp_failure_hint_from_messages(&[message]).is_none());
+            assert_eq!(
+                yt_dlp_failure_hint_from_messages(&[message]).as_deref(),
+                message.strip_prefix("ERROR: ")
+            );
             let logs = vec![JobLog {
                 id: 1,
                 job_id: "test".to_string(),
@@ -3409,28 +3431,47 @@ mod tests {
                 "Could not decrypt browser cookies from helium.".to_string(),
             ),
         ];
-        let summary = auth_attempt_failure_summary(&errors).unwrap();
+        let summary = auth_attempt_failure_summary(&errors, None).unwrap();
         assert!(summary.starts_with(source));
         assert!(summary.contains("firefox cookies: cookie database not found"));
         assert!(summary.contains("helium cookies: cookies could not be decrypted"));
-        assert!(auth_attempt_failure_summary(&errors[..1]).is_none());
+        assert!(auth_attempt_failure_summary(&errors[..1], None).is_none());
+        let generic_errors = vec![
+            (
+                "no auth".to_string(),
+                "yt-dlp exited with status 1".to_string(),
+            ),
+            errors[1].clone(),
+        ];
+        let generic_summary = auth_attempt_failure_summary(&generic_errors, None).unwrap();
+        assert!(generic_summary.starts_with("yt-dlp exited with status 1."));
+        assert!(generic_summary.contains("firefox cookies: cookie database not found"));
+        let hinted_summary = auth_attempt_failure_summary(
+            &generic_errors,
+            Some("Reddit requires authenticated Reddit cookies."),
+        )
+        .unwrap();
+        assert!(hinted_summary.starts_with("Reddit requires authenticated Reddit cookies."));
         let mut export_errors = errors;
         export_errors.push((
             "chrome cookies".to_string(),
             "Could not export Chrome cookies directly: key unavailable".to_string(),
         ));
-        let summary = auth_attempt_failure_summary(&export_errors).unwrap();
+        let summary = auth_attempt_failure_summary(&export_errors, None).unwrap();
         assert!(summary.starts_with(source));
         assert!(summary
             .contains("chrome cookies: Could not export Chrome cookies directly: key unavailable"));
         assert!(browser_cookie_failure_summary(&export_errors[3..])
             .unwrap()
             .contains("key unavailable"));
-        assert!(yt_dlp_failure_hint_from_messages(&[
-            "ERROR: could not find the requested content",
-            "The cookies database exists"
-        ])
-        .is_none());
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&[
+                "ERROR: could not find the requested content",
+                "The cookies database exists"
+            ])
+            .as_deref(),
+            Some("could not find the requested content")
+        );
     }
 
     #[test]
