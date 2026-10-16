@@ -400,7 +400,7 @@ fn run_download_inner(
         .logs_for_job(&job_id)
         .ok()
         .and_then(|logs| failure_hint_from_logs(&logs));
-    let auth_failure = browser_cookie_failure_summary(&attempt_errors);
+    let auth_failure = auth_attempt_failure_summary(&attempt_errors);
     let error = auth_failure.unwrap_or_else(|| match last_error {
         Some(error) if !is_generic_yt_dlp_exit_error(&error) => error,
         Some(error) => log_hint.unwrap_or(error),
@@ -1914,7 +1914,15 @@ fn is_generic_page_video_preset(preset: &Preset) -> bool {
 }
 
 fn should_resolve_embedded_page(input: &str) -> bool {
-    matches!(super::sites::detect_site(input), SiteKind::Generic)
+    // Instagram's page data contains quality variants, not separate gallery items.
+    // Its extractor selects the post's actual media and combines video with audio.
+    let instagram = Url::parse(input).ok().is_some_and(|url| {
+        url.host_str().is_some_and(|host| {
+            let host = host.trim_end_matches('.');
+            host == "instagram.com" || host.ends_with(".instagram.com")
+        })
+    });
+    !instagram && matches!(super::sites::detect_site(input), SiteKind::Generic)
 }
 
 fn page_media_filename(input: &str) -> Option<String> {
@@ -3034,10 +3042,6 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
         .map(|log| log.message.as_str())
         .collect::<Vec<_>>();
 
-    if let Some(hint) = yt_dlp_failure_hint_from_messages(&messages) {
-        return Some(hint);
-    }
-
     let joined = messages.join("\n").to_ascii_lowercase();
 
     if joined.contains("[reddit]") && joined.contains("no impersonate target is available") {
@@ -3058,11 +3062,41 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
         );
     }
 
-    None
+    yt_dlp_failure_hint_from_messages(&messages)
 }
 
 fn yt_dlp_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<String> {
-    browser_cookie_failure_hint_from_messages(messages)
+    browser_cookie_failure_hint_from_messages(messages).or_else(|| {
+        messages.iter().rev().find_map(|message| {
+            message
+                .as_ref()
+                .trim()
+                .strip_prefix("ERROR: ")
+                .filter(|message| message.starts_with("[Instagram]"))
+                .map(str::to_owned)
+        })
+    })
+}
+
+fn auth_attempt_failure_summary(errors: &[(String, String)]) -> Option<String> {
+    if let Some(summary) = browser_cookie_failure_summary(errors) {
+        return Some(summary);
+    }
+    let cookie_failures = errors
+        .iter()
+        .filter(|(_, error)| is_browser_cookie_failure_error(error))
+        .map(|(label, error)| format!("{label}: {}", compact_browser_cookie_failure(error)))
+        .collect::<Vec<_>>();
+    if cookie_failures.is_empty() {
+        return None;
+    }
+    let (_, source_error) = errors.iter().rev().find(|(_, error)| {
+        !is_browser_cookie_failure_error(error) && !is_generic_yt_dlp_exit_error(error)
+    })?;
+    Some(format!(
+        "{source_error} Browser-cookie fallbacks also failed: {}.",
+        cookie_failures.join("; ")
+    ))
 }
 
 fn is_generic_yt_dlp_exit_error(error: &str) -> bool {
@@ -3092,10 +3126,13 @@ fn browser_cookie_failure_summary(errors: &[(String, String)]) -> Option<String>
 fn is_browser_cookie_failure_error(error: &str) -> bool {
     error.starts_with("Could not import browser cookies")
         || error.starts_with("Could not decrypt browser cookies")
+        || error.starts_with("Could not export Chrome cookies directly")
 }
 
-fn compact_browser_cookie_failure(error: &str) -> &'static str {
-    if error.contains("desktop keyring") {
+fn compact_browser_cookie_failure(error: &str) -> &str {
+    if error.starts_with("Could not export Chrome cookies directly") {
+        error
+    } else if error.contains("desktop keyring") {
         "desktop keyring could not provide the cookie decryption key"
     } else if error.contains("could not find that browser's cookie database") {
         "cookie database not found"
@@ -3116,7 +3153,14 @@ fn browser_cookie_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> O
     let saw_cookie_import = joined.contains("extracting cookies from")
         || joined.contains("cookies-from-browser")
         || joined.contains("extract_cookies_from_browser");
-    if !saw_cookie_import {
+    let missing_cookie_database = values
+        .iter()
+        .flat_map(|message| message.lines())
+        .any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("could not find") && line.contains("cookies database")
+        });
+    if !saw_cookie_import && !missing_cookie_database {
         return None;
     }
 
@@ -3206,6 +3250,113 @@ fn fail_job(app: &Runtime, state: &backend::AppState, job_id: &str, error: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_existing_reddit_and_linkedin_failure_guidance() {
+        for (message, expected) in [
+            (
+                "ERROR: [Reddit] selected: no impersonate target is available",
+                "Install the app-managed yt-dlp",
+            ),
+            (
+                "ERROR: [Reddit] selected: Account authentication is required",
+                "authenticated Reddit cookies",
+            ),
+            (
+                "ERROR: [LinkedIn] selected: Unable to extract video",
+                "LinkedIn Feed Update preset",
+            ),
+        ] {
+            assert!(yt_dlp_failure_hint_from_messages(&[message]).is_none());
+            let logs = vec![JobLog {
+                id: 1,
+                job_id: "test".to_string(),
+                created_at: "2026-10-17T00:00:00Z".to_string(),
+                level: "error".to_string(),
+                message: message.to_string(),
+            }];
+            assert!(failure_hint_from_logs(&logs).unwrap().contains(expected));
+            let mut mixed = logs;
+            for message in [
+                "ERROR: could not find firefox cookies database in '/missing/profile'",
+                "yt-dlp exited with status 1",
+            ] {
+                mixed.push(JobLog {
+                    id: 2,
+                    job_id: "test".to_string(),
+                    created_at: String::new(),
+                    level: "error".to_string(),
+                    message: message.to_string(),
+                });
+            }
+            assert!(failure_hint_from_logs(&mixed).unwrap().contains(expected));
+        }
+    }
+
+    #[test]
+    fn preserves_instagram_source_error_before_cookie_fallback_failures() {
+        let source = "[Instagram] selected: Instagram sent an empty media response.";
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&[format!("ERROR: {source}")]),
+            Some(source.to_string())
+        );
+        let missing_browser = yt_dlp_failure_hint_from_messages(&[
+            "ERROR: could not find firefox cookies database in '/missing/profile'",
+        ])
+        .unwrap();
+        assert!(missing_browser.starts_with("Could not import browser cookies"));
+        let errors = vec![
+            ("no auth".to_string(), source.to_string()),
+            ("firefox cookies".to_string(), missing_browser),
+            (
+                "helium cookies".to_string(),
+                "Could not decrypt browser cookies from helium.".to_string(),
+            ),
+        ];
+        let summary = auth_attempt_failure_summary(&errors).unwrap();
+        assert!(summary.starts_with(source));
+        assert!(summary.contains("firefox cookies: cookie database not found"));
+        assert!(summary.contains("helium cookies: cookies could not be decrypted"));
+        assert!(auth_attempt_failure_summary(&errors[..1]).is_none());
+        let mut export_errors = errors;
+        export_errors.push((
+            "chrome cookies".to_string(),
+            "Could not export Chrome cookies directly: key unavailable".to_string(),
+        ));
+        let summary = auth_attempt_failure_summary(&export_errors).unwrap();
+        assert!(summary.starts_with(source));
+        assert!(summary
+            .contains("chrome cookies: Could not export Chrome cookies directly: key unavailable"));
+        assert!(browser_cookie_failure_summary(&export_errors[3..])
+            .unwrap()
+            .contains("key unavailable"));
+        assert!(yt_dlp_failure_hint_from_messages(&[
+            "ERROR: could not find the requested content",
+            "The cookies database exists"
+        ])
+        .is_none());
+    }
+
+    #[test]
+    fn instagram_uses_its_extractor_instead_of_collecting_quality_variants() {
+        for url in [
+            "https://www.instagram.com/reel/Chunk8-jurw/",
+            "https://instagram.com/p/selected/?img_index=2",
+            "https://m.instagram.com/reels/selected/",
+            "https://www.instagram.com./reel/selected/",
+        ] {
+            assert!(!should_resolve_embedded_page(url), "{url}");
+        }
+        for url in [
+            "https://portfolio.example/instagram.com/reel/selected/",
+            "https://notinstagram.com/reel/selected/",
+            "https://instagram.com.example.org/reel/selected/",
+            "https://instagram.com@portfolio.example/work",
+            "portfolio.example/work",
+        ] {
+            assert!(should_resolve_embedded_page(url), "{url}");
+        }
+    }
 
     #[test]
     fn extracts_squarespace_playlist_from_any_page() {
