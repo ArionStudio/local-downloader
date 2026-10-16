@@ -173,7 +173,7 @@ jobs:
           done
           cat ./*.sha256 > SHA256SUMS
           gh release upload "$tag" ./*.tar.gz ./*.zip ./*.sha256 SHA256SUMS \
-            ../docs/cli.md ../examples/adminhub-downloader.mjs --clobber
+            ../CHANGELOG.md ../docs/cli.md ../examples/adminhub-downloader.mjs --clobber
 
       - name: Publish GitHub release
         env:

@@ -18,7 +18,17 @@ downloader-cli schema
 downloader-cli download 'VIDEO_URL' --browser firefox --profile xrbazaar --events
 ```
 
+Read [CHANGELOG.md](CHANGELOG.md) for changes and [agent update instructions](docs/cli.md#updates-for-agents) for version checks, user-requested upgrades, and rollback. Both the guide and changelog are included in CLI archives and published as release assets.
+
 Each release includes SHA-256 checksums. Mac binaries are ad-hoc signed; [installation instructions](docs/cli.md#macos-and-linux) cover first-run approval when macOS requests it.
+
+## Preview and downloaded files
+
+Completed videos appear immediately in **Files**, including completed files from canceled batches. Use **Open video**, **Show in folder**, or **Copy path** to access them. Inline players show thumbnail posters before playback and support seeking.
+
+Preview volume starts at 10%. Changing volume or mute in one player updates all players and is remembered after restart. **Settings → Preview audio** also controls this shared setting.
+
+**Download for XRBAZAAR** keeps the original and creates a separate verified MP4 copy that meets the [XRBAZAAR media requirements](docs/cli.md#xrbazaar-and-adminhub).
 
 ## Development
 

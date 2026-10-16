@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -400,7 +400,7 @@ fn run_download_inner(
         .logs_for_job(&job_id)
         .ok()
         .and_then(|logs| failure_hint_from_logs(&logs));
-    let auth_failure = browser_cookie_failure_summary(&attempt_errors);
+    let auth_failure = auth_attempt_failure_summary(&attempt_errors, log_hint.as_deref());
     let error = auth_failure.unwrap_or_else(|| match last_error {
         Some(error) if !is_generic_yt_dlp_exit_error(&error) => error,
         Some(error) => log_hint.unwrap_or(error),
@@ -1004,11 +1004,16 @@ fn run_yt_dlp_attempt(
     cancel_flag: &Arc<AtomicBool>,
     phase: &str,
 ) -> Result<AttemptOutcome, String> {
+    let video_only = matches!(
+        input.advanced.as_ref().map(|advanced| &advanced.format),
+        Some(FormatSelection::VideoOnly { .. })
+    );
     let args = build_yt_dlp_args(input, preset, ffmpeg_location);
     update_phase(app, state, job_id, JobStatus::Downloading, 5.0, phase)?;
     let mut attempt_logs = Vec::new();
 
     let mut command = Command::new(yt_dlp);
+    configure_media_certificates(&mut command);
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -1036,8 +1041,10 @@ fn run_yt_dlp_attempt(
                 let line = ProcessLine::Stdout(line);
                 // Publish originals even while the worker prepares an earlier
                 // video for XRBAZAAR. The worker retries any publication error.
-                if let Some(path) = ready_path_from_line(&line) {
-                    let _ = publish_ready_file(&app, &state, &job_id, &path);
+                if !video_only {
+                    if let Some(path) = ready_path_from_line(&line) {
+                        let _ = publish_ready_file(&app, &state, &job_id, &path);
+                    }
                 }
                 let _ = sender.send(line);
             }
@@ -1058,6 +1065,22 @@ fn run_yt_dlp_attempt(
     let mut file_ready = |path: &str| -> Result<(), String> {
         if !prepared.insert(path.to_string()) {
             return Ok(());
+        }
+        if video_only {
+            let ffmpeg = tools::find_tool(app, "ffmpeg")
+                .ok_or("FFmpeg is required to remove audio for video-only downloads.")?;
+            update_phase(
+                app,
+                state,
+                job_id,
+                JobStatus::Postprocessing,
+                95.0,
+                "Removing audio",
+            )?;
+            let result = remove_video_audio(&ffmpeg, Path::new(path), cancel_flag, &mut |pid| {
+                state.set_process(job_id, pid.unwrap_or(download_pid))
+            });
+            result?;
         }
         publish_ready_file(app, state, job_id, path)?;
         if input.output_profile == super::OutputProfile::Xrbazaar {
@@ -1174,6 +1197,81 @@ fn run_yt_dlp_attempt(
         }
     }
     result
+}
+
+// Standalone macOS FFmpeg builds use OpenSSL but may retain their build
+// machine's CA path. Give child FFmpeg processes the macOS trust bundle while
+// preserving an explicitly configured certificate file.
+fn configure_media_certificates(command: &mut Command) {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("SSL_CERT_FILE").is_none() && Path::new("/etc/ssl/cert.pem").is_file() {
+        command.env("SSL_CERT_FILE", "/etc/ssl/cert.pem");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = command;
+}
+
+// Format selectors can fall back to a combined video/audio file. Remux before
+// announcing readiness so "video only" also works for direct MP4 sources.
+fn remove_video_audio(
+    ffmpeg: &Path,
+    path: &Path,
+    cancel: &AtomicBool,
+    process: &mut dyn FnMut(Option<u32>) -> Result<(), String>,
+) -> Result<(), String> {
+    struct TemporaryFile(PathBuf);
+    impl Drop for TemporaryFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Canceled".into());
+    }
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("mp4");
+    let temporary = TemporaryFile(path.with_file_name(format!(
+        ".video-only-{}.part.{extension}",
+        uuid::Uuid::new_v4()
+    )));
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-nostdin", "-v", "error", "-n", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-c:v", "copy", "-an"])
+        .arg(&temporary.0)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    process_control::isolate_process_group(&mut command);
+    let mut child = process_control::ChildGuard(command.spawn().map_err(|e| e.to_string())?);
+    process(Some(child.id()))?;
+    let stderr = child.stderr.take().unwrap();
+    let reader = thread::spawn(move || {
+        let mut message = String::new();
+        let _ = stderr.take(64 * 1024).read_to_string(&mut message);
+        message
+    });
+    let result = (|| loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("Canceled".into());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("Removing audio failed ({status})"))
+            };
+        }
+        thread::sleep(Duration::from_millis(100));
+    })();
+    // Reap before joining the pipe reader, including cancellation and failures.
+    drop(child);
+    let errors = reader.join().unwrap_or_default();
+    process(None)?;
+    result.map_err(|e| format!("{e}: {}", redaction::sanitize_log_line(errors.trim())))?;
+    if cancel.load(Ordering::SeqCst) {
+        return Err("Canceled".into());
+    }
+    fs::rename(&temporary.0, path).map_err(|e| format!("Could not save video without audio: {e}"))
 }
 
 fn drain_process_lines(
@@ -1914,7 +2012,15 @@ fn is_generic_page_video_preset(preset: &Preset) -> bool {
 }
 
 fn should_resolve_embedded_page(input: &str) -> bool {
-    matches!(super::sites::detect_site(input), SiteKind::Generic)
+    // Instagram's page data contains quality variants, not separate gallery items.
+    // Its extractor selects the post's actual media and combines video with audio.
+    let instagram = Url::parse(input).ok().is_some_and(|url| {
+        url.host_str().is_some_and(|host| {
+            let host = host.trim_end_matches('.');
+            host == "instagram.com" || host.ends_with(".instagram.com")
+        })
+    });
+    !instagram && matches!(super::sites::detect_site(input), SiteKind::Generic)
 }
 
 fn page_media_filename(input: &str) -> Option<String> {
@@ -3034,10 +3140,6 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
         .map(|log| log.message.as_str())
         .collect::<Vec<_>>();
 
-    if let Some(hint) = yt_dlp_failure_hint_from_messages(&messages) {
-        return Some(hint);
-    }
-
     let joined = messages.join("\n").to_ascii_lowercase();
 
     if joined.contains("[reddit]") && joined.contains("no impersonate target is available") {
@@ -3058,11 +3160,58 @@ fn failure_hint_from_logs(logs: &[JobLog]) -> Option<String> {
         );
     }
 
-    None
+    yt_dlp_failure_hint_from_messages(&messages)
 }
 
 fn yt_dlp_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> Option<String> {
-    browser_cookie_failure_hint_from_messages(messages)
+    browser_cookie_failure_hint_from_messages(messages).or_else(|| {
+        messages.iter().rev().find_map(|message| {
+            let line = message.as_ref().trim();
+            line.strip_prefix("ERROR:")
+                .map(|reason| redaction::sanitize_log_line(reason.trim()))
+                .filter(|reason| !reason.is_empty())
+        })
+    })
+}
+
+fn auth_attempt_failure_summary(
+    errors: &[(String, String)],
+    source_hint: Option<&str>,
+) -> Option<String> {
+    if let Some(summary) = browser_cookie_failure_summary(errors) {
+        return Some(summary);
+    }
+    let cookie_failures = errors
+        .iter()
+        .filter(|(_, error)| is_browser_cookie_failure_error(error))
+        .map(|(label, error)| format!("{label}: {}", compact_browser_cookie_failure(error)))
+        .collect::<Vec<_>>();
+    if cookie_failures.is_empty() {
+        return None;
+    }
+    let source_error = errors
+        .iter()
+        .rev()
+        .find(|(_, error)| {
+            !is_browser_cookie_failure_error(error) && !is_generic_yt_dlp_exit_error(error)
+        })
+        .map(|(_, error)| error.as_str())
+        .or_else(|| {
+            source_hint.filter(|hint| {
+                !is_browser_cookie_failure_error(hint) && !is_generic_yt_dlp_exit_error(hint)
+            })
+        })
+        .or_else(|| {
+            errors
+                .iter()
+                .find(|(_, error)| !is_browser_cookie_failure_error(error))
+                .map(|(_, error)| error.as_str())
+        })?;
+    Some(format!(
+        "{}. Browser-cookie fallbacks also failed: {}",
+        source_error.trim_end_matches('.'),
+        cookie_failures.join("; ")
+    ))
 }
 
 fn is_generic_yt_dlp_exit_error(error: &str) -> bool {
@@ -3092,10 +3241,13 @@ fn browser_cookie_failure_summary(errors: &[(String, String)]) -> Option<String>
 fn is_browser_cookie_failure_error(error: &str) -> bool {
     error.starts_with("Could not import browser cookies")
         || error.starts_with("Could not decrypt browser cookies")
+        || error.starts_with("Could not export Chrome cookies directly")
 }
 
-fn compact_browser_cookie_failure(error: &str) -> &'static str {
-    if error.contains("desktop keyring") {
+fn compact_browser_cookie_failure(error: &str) -> &str {
+    if error.starts_with("Could not export Chrome cookies directly") {
+        error
+    } else if error.contains("desktop keyring") {
         "desktop keyring could not provide the cookie decryption key"
     } else if error.contains("could not find that browser's cookie database") {
         "cookie database not found"
@@ -3116,7 +3268,14 @@ fn browser_cookie_failure_hint_from_messages<T: AsRef<str>>(messages: &[T]) -> O
     let saw_cookie_import = joined.contains("extracting cookies from")
         || joined.contains("cookies-from-browser")
         || joined.contains("extract_cookies_from_browser");
-    if !saw_cookie_import {
+    let missing_cookie_database = values
+        .iter()
+        .flat_map(|message| message.lines())
+        .any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("could not find") && line.contains("cookies database")
+        });
+    if !saw_cookie_import && !missing_cookie_database {
         return None;
     }
 
@@ -3206,6 +3365,135 @@ fn fail_job(app: &Runtime, state: &backend::AppState, job_id: &str, error: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_existing_reddit_and_linkedin_failure_guidance() {
+        for (message, expected) in [
+            (
+                "ERROR: [Reddit] selected: no impersonate target is available",
+                "Install the app-managed yt-dlp",
+            ),
+            (
+                "ERROR: [Reddit] selected: Account authentication is required",
+                "authenticated Reddit cookies",
+            ),
+            (
+                "ERROR: [LinkedIn] selected: Unable to extract video",
+                "LinkedIn Feed Update preset",
+            ),
+        ] {
+            assert_eq!(
+                yt_dlp_failure_hint_from_messages(&[message]).as_deref(),
+                message.strip_prefix("ERROR: ")
+            );
+            let logs = vec![JobLog {
+                id: 1,
+                job_id: "test".to_string(),
+                created_at: "2026-10-17T00:00:00Z".to_string(),
+                level: "error".to_string(),
+                message: message.to_string(),
+            }];
+            assert!(failure_hint_from_logs(&logs).unwrap().contains(expected));
+            let mut mixed = logs;
+            for message in [
+                "ERROR: could not find firefox cookies database in '/missing/profile'",
+                "yt-dlp exited with status 1",
+            ] {
+                mixed.push(JobLog {
+                    id: 2,
+                    job_id: "test".to_string(),
+                    created_at: String::new(),
+                    level: "error".to_string(),
+                    message: message.to_string(),
+                });
+            }
+            assert!(failure_hint_from_logs(&mixed).unwrap().contains(expected));
+        }
+    }
+
+    #[test]
+    fn preserves_instagram_source_error_before_cookie_fallback_failures() {
+        let source = "[Instagram] selected: Instagram sent an empty media response.";
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&[format!("ERROR: {source}")]),
+            Some(source.to_string())
+        );
+        let missing_browser = yt_dlp_failure_hint_from_messages(&[
+            "ERROR: could not find firefox cookies database in '/missing/profile'",
+        ])
+        .unwrap();
+        assert!(missing_browser.starts_with("Could not import browser cookies"));
+        let errors = vec![
+            ("no auth".to_string(), source.to_string()),
+            ("firefox cookies".to_string(), missing_browser),
+            (
+                "helium cookies".to_string(),
+                "Could not decrypt browser cookies from helium.".to_string(),
+            ),
+        ];
+        let summary = auth_attempt_failure_summary(&errors, None).unwrap();
+        assert!(summary.starts_with(source));
+        assert!(summary.contains("firefox cookies: cookie database not found"));
+        assert!(summary.contains("helium cookies: cookies could not be decrypted"));
+        assert!(auth_attempt_failure_summary(&errors[..1], None).is_none());
+        let generic_errors = vec![
+            (
+                "no auth".to_string(),
+                "yt-dlp exited with status 1".to_string(),
+            ),
+            errors[1].clone(),
+        ];
+        let generic_summary = auth_attempt_failure_summary(&generic_errors, None).unwrap();
+        assert!(generic_summary.starts_with("yt-dlp exited with status 1."));
+        assert!(generic_summary.contains("firefox cookies: cookie database not found"));
+        let hinted_summary = auth_attempt_failure_summary(
+            &generic_errors,
+            Some("Reddit requires authenticated Reddit cookies."),
+        )
+        .unwrap();
+        assert!(hinted_summary.starts_with("Reddit requires authenticated Reddit cookies."));
+        let mut export_errors = errors;
+        export_errors.push((
+            "chrome cookies".to_string(),
+            "Could not export Chrome cookies directly: key unavailable".to_string(),
+        ));
+        let summary = auth_attempt_failure_summary(&export_errors, None).unwrap();
+        assert!(summary.starts_with(source));
+        assert!(summary
+            .contains("chrome cookies: Could not export Chrome cookies directly: key unavailable"));
+        assert!(browser_cookie_failure_summary(&export_errors[3..])
+            .unwrap()
+            .contains("key unavailable"));
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&[
+                "ERROR: could not find the requested content",
+                "The cookies database exists"
+            ])
+            .as_deref(),
+            Some("could not find the requested content")
+        );
+    }
+
+    #[test]
+    fn instagram_uses_its_extractor_instead_of_collecting_quality_variants() {
+        for url in [
+            "https://www.instagram.com/reel/Chunk8-jurw/",
+            "https://instagram.com/p/selected/?img_index=2",
+            "https://m.instagram.com/reels/selected/",
+            "https://www.instagram.com./reel/selected/",
+        ] {
+            assert!(!should_resolve_embedded_page(url), "{url}");
+        }
+        for url in [
+            "https://portfolio.example/instagram.com/reel/selected/",
+            "https://notinstagram.com/reel/selected/",
+            "https://instagram.com.example.org/reel/selected/",
+            "https://instagram.com@portfolio.example/work",
+            "portfolio.example/work",
+        ] {
+            assert!(should_resolve_embedded_page(url), "{url}");
+        }
+    }
 
     #[test]
     fn extracts_squarespace_playlist_from_any_page() {
@@ -3474,6 +3762,37 @@ mod tests {
 
         assert!(hint.contains("Could not import browser cookies from chrome"));
         assert!(hint.contains("desktop keyring"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_media_command_uses_system_certificates_without_changing_global_environment() {
+        let original = std::env::var_os("SSL_CERT_FILE");
+        let mut command = Command::new("yt-dlp");
+        configure_media_certificates(&mut command);
+        let configured = command.get_envs().find(|(key, _)| *key == "SSL_CERT_FILE");
+        if original.is_none() && Path::new("/etc/ssl/cert.pem").is_file() {
+            assert_eq!(configured.unwrap().1.unwrap(), "/etc/ssl/cert.pem");
+        } else {
+            assert!(
+                configured.is_none(),
+                "Explicit certificate settings must be inherited"
+            );
+        }
+        assert_eq!(std::env::var_os("SSL_CERT_FILE"), original);
+    }
+
+    #[test]
+    fn preserves_source_failure_reason() {
+        let messages = [
+            "WARNING: Retrying",
+            "ERROR: [vimeo] This video requires login",
+        ];
+        assert_eq!(
+            yt_dlp_failure_hint_from_messages(&messages).as_deref(),
+            Some("[vimeo] This video requires login")
+        );
+        assert!(yt_dlp_failure_hint_from_messages(&["Downloading", "ERROR: "]).is_none());
     }
 
     #[test]

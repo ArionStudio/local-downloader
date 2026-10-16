@@ -52,6 +52,7 @@ import {
   cancelJob,
   checkAppUpdate,
   checkToolUpdates,
+  createVideoThumbnail,
   getAppInfo,
   getJob,
   getSettings,
@@ -61,6 +62,7 @@ import {
   getToolPlatform,
   listJobs,
   listYoutubeApiKeys,
+  localFilePreviewUrl,
   onDownloadJobEvent,
   openOutputPath,
   readClipboardText,
@@ -72,6 +74,7 @@ import {
   writeClipboardText,
 } from "@/lib/api"
 import { defaultSettings } from "@/lib/fallback"
+import { setPlayback, usePlayback } from "@/lib/playback"
 import type {
   AnalyzeResult,
   AdvancedDownloadOptions,
@@ -1437,6 +1440,7 @@ function SettingsPage({
   onCopyLogs,
 }: SettingsPageProps) {
   const { theme, setTheme } = useTheme()
+  const playback = usePlayback()
   const [platform, setPlatform] = useState<ToolPlatform | null>(null)
   useEffect(() => {
     getToolPlatform()
@@ -1704,6 +1708,42 @@ function SettingsPage({
               <SelectItem value="dark">Dark</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+      </section>
+
+      <section className="rounded-xl border bg-card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-medium">Preview audio</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Shared by all videos and remembered next time. Starts at 10%.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-3 sm:w-72">
+            <input
+              type="range"
+              aria-label="Preview volume"
+              min="0"
+              max="100"
+              step="1"
+              value={Math.round(playback.volume * 100)}
+              onChange={(event) =>
+                setPlayback(Number(event.target.value) / 100, playback.muted)
+              }
+              className="min-w-0 flex-1 accent-primary"
+            />
+            <output className="w-10 text-right text-xs tabular-nums">
+              {Math.round(playback.volume * 100)}%
+            </output>
+            <Button
+              variant="outline"
+              size="sm"
+              aria-pressed={playback.muted}
+              onClick={() => setPlayback(playback.volume, !playback.muted)}
+            >
+              {playback.muted ? "Unmute previews" : "Mute previews"}
+            </Button>
+          </div>
         </div>
       </section>
 
@@ -3050,10 +3090,36 @@ function AssetPreview({ path }: { path: string }) {
 }
 
 function VideoPreview({ path }: { path: string }) {
+  const container = useRef<HTMLDivElement>(null)
+  const video = useRef<HTMLVideoElement>(null)
+  const playback = usePlayback()
+  const [visible, setVisible] = useState(false)
   const [source, setSource] = useState<string | null>(null)
+  const [poster, setPoster] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
   useEffect(() => {
+    if (!video.current) return
+    video.current.volume = playback.volume
+    video.current.muted = playback.muted
+  }, [playback, source, error])
+  useEffect(() => {
+    const element = container.current
+    if (!element) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: "200px" }
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  useEffect(() => {
+    if (!visible) return
     let canceled = false
     prepareMediaPreview(path)
       .then((url) => {
@@ -3063,13 +3129,23 @@ function VideoPreview({ path }: { path: string }) {
         if (!canceled)
           setError(reason instanceof Error ? reason.message : String(reason))
       })
+    createVideoThumbnail(path)
+      .then((thumbnail) => {
+        if (!canceled && thumbnail) setPoster(localFilePreviewUrl(thumbnail))
+      })
+      .catch(() => {
+        // Thumbnail generation must not prevent otherwise supported playback.
+      })
     return () => {
       canceled = true
     }
-  }, [path, attempt])
+  }, [path, attempt, visible])
 
   return (
-    <div className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-muted">
+    <div
+      ref={container}
+      className="relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-muted"
+    >
       {error ? (
         <div
           role="status"
@@ -3102,13 +3178,18 @@ function VideoPreview({ path }: { path: string }) {
         </div>
       ) : source ? (
         <video
+          ref={video}
           key={attempt}
           src={source}
+          poster={poster ?? undefined}
           aria-label={`Preview of ${fileNameFromPath(path)}`}
           className="h-full w-full object-contain"
           controls
           playsInline
           preload="metadata"
+          onVolumeChange={(event) =>
+            setPlayback(event.currentTarget.volume, event.currentTarget.muted)
+          }
           onError={(event) =>
             setError(
               event.currentTarget.error?.code === 3 ||
