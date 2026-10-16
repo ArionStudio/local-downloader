@@ -407,14 +407,17 @@ fn open_path(path: &str, reveal: bool) -> CommandResult<()> {
 }
 
 fn create_thumbnail(app: &AppHandle, path: &str) -> CommandResult<Option<String>> {
-    let path = Path::new(path);
-    if !path.exists() {
+    // Bound FFmpeg work when a grid exposes several videos at once, and avoid
+    // concurrent writes when the same file appears in Activity and Files.
+    static THUMBNAIL_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = THUMBNAIL_LOCK.lock().map_err(|e| e.to_string())?;
+    let path = Path::new(path).canonicalize().map_err(|e| e.to_string())?;
+    if !app.asset_protocol_scope().is_allowed(&path) {
+        return Err("This video is outside the allowed preview folders.".into());
+    }
+    if !path.is_file() {
         return Ok(None);
     }
-
-    let Some(ffmpeg) = tools::find_tool(&Runtime::from_app(app)?, "ffmpeg") else {
-        return Ok(None);
-    };
 
     let cache_dir = app
         .path()
@@ -423,30 +426,55 @@ fn create_thumbnail(app: &AppHandle, path: &str) -> CommandResult<Option<String>
         .join("thumbnails");
     std::fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
 
-    let output = cache_dir.join(format!("{}.jpg", stable_path_hash(path)));
+    let output = cache_dir.join(format!("{}.jpg", thumbnail_cache_key(&path)?));
     if output.exists() {
         return Ok(Some(output.display().to_string()));
     }
 
+    let Some(ffmpeg) = tools::find_tool(&Runtime::from_app(app)?, "ffmpeg") else {
+        return Ok(None);
+    };
+    let temporary = cache_dir.join(format!("{}.jpg", Uuid::new_v4()));
+
     let status = Command::new(ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-ss", "1"])
+        .args([
+            "-nostdin",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "1",
+        ])
         .arg("-i")
-        .arg(path)
-        .args(["-frames:v", "1", "-vf", "scale=360:-1"])
-        .arg(&output)
+        .arg(&path)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=480:-1,thumbnail=30",
+            "-update",
+            "1",
+        ])
+        .arg(&temporary)
         .status()
         .map_err(|error| format!("Could not run ffmpeg: {error}"))?;
 
-    if status.success() && output.exists() {
+    if status.success() && temporary.metadata().is_ok_and(|m| m.len() > 0) {
+        std::fs::rename(&temporary, &output).map_err(|e| e.to_string())?;
         Ok(Some(output.display().to_string()))
     } else {
+        let _ = std::fs::remove_file(temporary);
         Ok(None)
     }
 }
 
-fn stable_path_hash(path: &Path) -> u64 {
+fn thumbnail_cache_key(path: &Path) -> CommandResult<u64> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
-    hasher.finish()
+    let metadata = path.metadata().map_err(|e| e.to_string())?;
+    metadata.len().hash(&mut hasher);
+    metadata.modified().ok().hash(&mut hasher);
+    Ok(hasher.finish())
 }

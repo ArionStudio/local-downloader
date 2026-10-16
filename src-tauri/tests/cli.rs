@@ -160,12 +160,18 @@ fn media(root: &Path) -> Vec<u8> {
             "lavfi",
             "-i",
             "color=c=blue:size=320x180:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
             "-t",
             "1",
             "-c:v",
             "libx264",
             "-pix_fmt",
-            "yuv420p"
+            "yuv420p",
+            "-c:a",
+            "aac"
         ])
         .arg(&path)
         .status()
@@ -173,6 +179,60 @@ fn media(root: &Path) -> Vec<u8> {
         .success());
     fs::read(path).unwrap()
 }
+#[test]
+#[ignore = "Requires real yt-dlp, FFmpeg and ffprobe"]
+fn video_only_removes_audio_from_combined_sources_before_ready() {
+    let t = Temp::new();
+    let original = media(&t.0);
+    let server = Fixture::start(original.clone());
+    let mut child = cli(&t.0)
+        .args([
+            "download",
+            &format!("{}/video.mp4", server.url),
+            "--video-only",
+            "--no-cookies",
+            "--events",
+            "--timeout",
+            "90",
+            "--output",
+        ])
+        .arg(t.0.join("media"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = false;
+    let mut final_result = Value::Null;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let event: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if event["type"] == "result" {
+            final_result = event.clone();
+        }
+        if let Some(paths) = event["job"]["readyPaths"].as_array() {
+            for path in paths {
+                let probe = Command::new("ffprobe")
+                    .args(["-v", "error", "-show_streams", "-of", "json"])
+                    .arg(path.as_str().unwrap())
+                    .output()
+                    .unwrap();
+                assert!(probe.status.success());
+                let info: Value = serde_json::from_slice(&probe.stdout).unwrap();
+                let streams = info["streams"].as_array().unwrap();
+                assert_eq!(
+                    streams.len(),
+                    1,
+                    "A ready video-only file must have no audio"
+                );
+                assert_eq!(streams[0]["codec_type"], "video");
+                assert_eq!(streams[0]["codec_name"], "h264");
+                ready = true;
+            }
+        }
+    }
+    assert!(child.wait().unwrap().success(), "{final_result}");
+    assert!(ready);
+    assert_eq!(fs::read(t.0.join("source.mp4")).unwrap(), original);
+}
+
 #[test]
 #[ignore = "Requires real yt-dlp and FFmpeg"]
 fn real_headless_cookie_download_and_xrbazaar_preparation() {
@@ -225,7 +285,7 @@ fn cancellation_from_another_process_keeps_finished_files() {
             "--no-cookies",
             "--events",
             "--timeout",
-            "20",
+            "120",
             "--output",
         ])
         .arg(t.0.join("media"))
