@@ -1864,6 +1864,12 @@ function SettingsPage({
               value={formatCheckedAt(appUpdateState.checkedAt)}
             />
             <InfoRow label="State" value={appUpdateState.message} />
+            {appInfo?.selfUpdateBlocker ? (
+              <InfoRow
+                label="How to update"
+                value={appInfo.selfUpdateBlocker}
+              />
+            ) : null}
             {appUpdateState.update ? (
               <>
                 <InfoRow
@@ -1897,8 +1903,9 @@ function SettingsPage({
               type="button"
               className="gap-1.5"
               disabled={
-                appUpdateState.status !== "available" &&
-                appUpdateState.status !== "failed"
+                Boolean(appInfo?.selfUpdateBlocker) ||
+                (appUpdateState.status !== "available" &&
+                  appUpdateState.status !== "failed")
               }
               onClick={onInstallAppUpdate}
             >

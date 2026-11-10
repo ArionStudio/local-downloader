@@ -166,6 +166,7 @@ export type AppInfo = {
   name: string
   version: string
   updaterEndpoint: string
+  selfUpdateBlocker: string | null
 }
 
 export type ToolUpdate = {

@@ -103,6 +103,8 @@ pub struct AppInfo {
     name: String,
     version: String,
     updater_endpoint: String,
+    /// Why this copy cannot replace itself, when the user must update it another way.
+    self_update_blocker: Option<String>,
 }
 
 #[tauri::command]
@@ -222,6 +224,9 @@ pub async fn check_app_update(app: AppHandle) -> CommandResult<Option<AppUpdate>
 
 #[tauri::command]
 pub async fn install_app_update(app: AppHandle) -> CommandResult<()> {
+    if let Some(reason) = self_update_blocker(&app) {
+        return Err(reason);
+    }
     if let Some(update) = app
         .updater()
         .map_err(|error| error.to_string())?
@@ -239,14 +244,69 @@ pub async fn install_app_update(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+// On Linux the updater replaces the AppImage file in place, which needs write
+// access to its folder. A copy unpacked by a system package (for example into
+// /opt) has no AppImage file and sits in a root-owned folder, so the update
+// would fail with "Permission denied". Deb installs update through dpkg.
+#[cfg(target_os = "linux")]
+fn self_update_blocker(app: &AppHandle) -> Option<String> {
+    if tauri::utils::platform::bundle_type() != Some(tauri::utils::config::BundleType::AppImage) {
+        return None;
+    }
+    let executable = tauri::utils::platform::current_exe().ok()?;
+    appimage_update_blocker(
+        app.env().appimage.as_deref().map(Path::new),
+        &executable,
+        directory_is_writable,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn self_update_blocker(_app: &AppHandle) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_update_blocker(
+    appimage: Option<&Path>,
+    executable: &Path,
+    is_writable: impl Fn(&Path) -> bool,
+) -> Option<String> {
+    let Some(appimage) = appimage else {
+        let install_dir = executable.parent().unwrap_or(executable);
+        return Some(format!(
+            "This copy was installed by a system package in {}, so it cannot update itself. Update it with your package manager.",
+            install_dir.display()
+        ));
+    };
+    let folder = appimage.parent()?;
+    (!is_writable(folder)).then(|| {
+        format!(
+            "This AppImage is in {}, which this user cannot write to, so it cannot update itself. Move it to a folder you own, or update it the way you installed it.",
+            folder.display()
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn directory_is_writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
 #[tauri::command]
-pub fn get_app_info() -> AppInfo {
+pub fn get_app_info(app: AppHandle) -> AppInfo {
     AppInfo {
         name: "Downloader".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         updater_endpoint:
             "https://github.com/ArionStudio/local-downloader/releases/latest/download/latest.json"
                 .to_string(),
+        self_update_blocker: self_update_blocker(&app),
     }
 }
 
@@ -477,4 +537,40 @@ fn thumbnail_cache_key(path: &Path) -> CommandResult<u64> {
     metadata.len().hash(&mut hasher);
     metadata.modified().ok().hash(&mut hasher);
     Ok(hasher.finish())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_installed_copy_cannot_update_itself() {
+        let reason = appimage_update_blocker(
+            None,
+            Path::new("/opt/local-downloader-bin/usr/bin/Downloader"),
+            |_| true,
+        )
+        .expect("an unpacked copy must not self-update");
+        assert!(reason.contains("package manager"));
+        assert!(reason.contains("/opt/local-downloader-bin/usr/bin"));
+    }
+
+    #[test]
+    fn appimage_updates_only_from_a_writable_folder() {
+        let appimage = Path::new("/home/user/Applications/Downloader.AppImage");
+        let executable = Path::new("/tmp/.mount_Downl/usr/bin/Downloader");
+        assert_eq!(
+            appimage_update_blocker(Some(appimage), executable, |_| true),
+            None
+        );
+        let reason = appimage_update_blocker(Some(appimage), executable, |_| false)
+            .expect("a read-only folder must block the update");
+        assert!(reason.contains("/home/user/Applications"));
+    }
+
+    #[test]
+    fn checks_real_folder_permissions() {
+        assert!(directory_is_writable(&std::env::temp_dir()));
+        assert!(!directory_is_writable(Path::new("/proc")));
+    }
 }
