@@ -99,6 +99,7 @@ export async function getAppInfo(): Promise<AppInfo> {
       version: "0.1.1",
       updaterEndpoint:
         "https://github.com/ArionStudio/local-downloader/releases/latest/download/latest.json",
+      selfUpdateBlocker: null,
     }
   }
   return invoke("get_app_info")

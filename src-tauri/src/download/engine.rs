@@ -1004,11 +1004,93 @@ fn run_yt_dlp_attempt(
     cancel_flag: &Arc<AtomicBool>,
     phase: &str,
 ) -> Result<AttemptOutcome, String> {
+    let args = build_yt_dlp_args(input, preset, ffmpeg_location);
+    let (outcome, attempt_logs) = run_yt_dlp_process(
+        app,
+        state,
+        job_id,
+        input,
+        args.clone(),
+        yt_dlp,
+        cancel_flag,
+        phase,
+    )?;
+    if !matches!(outcome, AttemptOutcome::Failed(_))
+        || !ffmpeg_rejected_encrypted_hls(&attempt_logs)
+    {
+        return Ok(outcome);
+    }
+
+    log(
+        app,
+        state,
+        job_id,
+        "warn",
+        "FFmpeg rejected the encrypted HLS segments; retrying with its segment extension check disabled.",
+    )?;
+    let (outcome, _) = run_yt_dlp_process(
+        app,
+        state,
+        job_id,
+        input,
+        with_lenient_hls_segments(args),
+        yt_dlp,
+        cancel_flag,
+        phase,
+    )?;
+    Ok(match outcome {
+        AttemptOutcome::Failed(error) => AttemptOutcome::Failed(format!(
+            "{}. This video uses AES-128 encrypted HLS and the yt-dlp in use cannot decrypt it. Install the app-managed yt-dlp from Settings > Tools, then retry.",
+            error.trim_end_matches('.')
+        )),
+        outcome => outcome,
+    })
+}
+
+// yt-dlp hands AES-128 HLS to FFmpeg when pycryptodomex is missing (common
+// for system or pip installs). FFmpeg 7.1+ then refuses segment URLs without
+// a media extension, which Squarespace and other CDNs use, and exits with 183
+// (invalid data). yt-dlp hides FFmpeg's own message because the app passes
+// --print, so the exit code is the only signal. HTTP and network failures
+// exit with other codes and are not retried.
+fn ffmpeg_rejected_encrypted_hls<T: AsRef<str>>(messages: &[T]) -> bool {
+    let mut delegated = false;
+    let mut rejected = false;
+    for message in messages {
+        let line = message.as_ref().trim().to_ascii_lowercase();
+        delegated |= line.contains("aes-128 encryption") && line.contains("delegated to ffmpeg");
+        rejected |= line == "error: ffmpeg exited with code 183";
+    }
+    delegated && rejected
+}
+
+fn with_lenient_hls_segments(mut args: Vec<String>) -> Vec<String> {
+    let url_index = args.len().saturating_sub(1);
+    args.splice(
+        url_index..url_index,
+        [
+            "--downloader-args".to_string(),
+            "ffmpeg_i:-extension_picky 0".to_string(),
+        ],
+    );
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_yt_dlp_process(
+    app: &Runtime,
+    state: &backend::AppState,
+    job_id: &str,
+    input: &StartDownloadRequest,
+    args: Vec<String>,
+    yt_dlp: &std::path::Path,
+    cancel_flag: &Arc<AtomicBool>,
+    phase: &str,
+) -> Result<(AttemptOutcome, Vec<String>), String> {
     let video_only = matches!(
         input.advanced.as_ref().map(|advanced| &advanced.format),
         Some(FormatSelection::VideoOnly { .. })
     );
-    let args = build_yt_dlp_args(input, preset, ffmpeg_location);
     update_phase(app, state, job_id, JobStatus::Downloading, 5.0, phase)?;
     let mut attempt_logs = Vec::new();
 
@@ -1125,7 +1207,7 @@ fn run_yt_dlp_attempt(
             let _ = child.kill();
             let _ = child.wait();
             mark_canceled(app, state, job_id)?;
-            return Ok(AttemptOutcome::Canceled);
+            return Ok((AttemptOutcome::Canceled, Vec::new()));
         }
 
         drain_process_lines(
@@ -1144,7 +1226,7 @@ fn run_yt_dlp_attempt(
             let _ = child.kill();
             let _ = child.wait();
             mark_canceled(app, state, job_id)?;
-            return Ok(AttemptOutcome::Canceled);
+            return Ok((AttemptOutcome::Canceled, Vec::new()));
         }
 
         if let Some(status) = child
@@ -1165,16 +1247,19 @@ fn run_yt_dlp_attempt(
 
             if cancel_flag.load(Ordering::SeqCst) {
                 mark_canceled(app, state, job_id)?;
-                return Ok(AttemptOutcome::Canceled);
+                return Ok((AttemptOutcome::Canceled, Vec::new()));
             }
 
             if status.success() {
-                return Ok(AttemptOutcome::Succeeded);
+                return Ok((AttemptOutcome::Succeeded, Vec::new()));
             }
 
             let error = yt_dlp_failure_hint_from_messages(&attempt_logs)
                 .unwrap_or_else(|| format!("yt-dlp exited with status {status}"));
-            return Ok(AttemptOutcome::Failed(error));
+            return Ok((
+                AttemptOutcome::Failed(error),
+                std::mem::take(&mut attempt_logs),
+            ));
         }
 
         thread::sleep(Duration::from_millis(180));
@@ -3793,6 +3878,44 @@ mod tests {
             Some("[vimeo] This video requires login")
         );
         assert!(yt_dlp_failure_hint_from_messages(&["Downloading", "ERROR: "]).is_none());
+    }
+
+    #[test]
+    fn detects_ffmpeg_rejecting_encrypted_hls_handed_off_by_yt_dlp() {
+        let delegated = "WARNING: The stream has AES-128 encryption and pycryptodomex is not available; extraction will be delegated to ffmpeg";
+        assert!(ffmpeg_rejected_encrypted_hls(&[
+            delegated,
+            "",
+            "ERROR: ffmpeg exited with code 183",
+        ]));
+        assert!(!ffmpeg_rejected_encrypted_hls(&[
+            "ERROR: ffmpeg exited with code 183"
+        ]));
+        assert!(!ffmpeg_rejected_encrypted_hls(&[
+            delegated,
+            "ERROR: [generic] Unable to download webpage: HTTP Error 403",
+        ]));
+        assert!(!ffmpeg_rejected_encrypted_hls(&[
+            delegated,
+            "ERROR: ffmpeg exited with code 8",
+        ]));
+    }
+
+    #[test]
+    fn disables_ffmpeg_segment_extension_check_before_the_url() {
+        let args = with_lenient_hls_segments(vec![
+            "--no-playlist".to_string(),
+            "https://video.squarespace-cdn.com/content/v1/a/b/playlist.m3u8".to_string(),
+        ]);
+        assert_eq!(
+            args,
+            [
+                "--no-playlist",
+                "--downloader-args",
+                "ffmpeg_i:-extension_picky 0",
+                "https://video.squarespace-cdn.com/content/v1/a/b/playlist.m3u8",
+            ]
+        );
     }
 
     #[test]
