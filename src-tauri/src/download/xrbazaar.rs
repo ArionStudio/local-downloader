@@ -331,9 +331,12 @@ fn prepare_with_limit(
                         .args([
                             "-b:v",
                             &(budget as u64).to_string(),
-                            "-pass",
+                            // Two-pass applies to video only. Without the
+                            // stream specifier, newer FFmpeg also asks the
+                            // audio encoder for a pass log and fails.
+                            "-pass:v",
                             &pass.to_string(),
-                            "-passlogfile",
+                            "-passlogfile:v",
                         ])
                         .arg(&passlog);
                 }

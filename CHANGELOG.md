@@ -6,6 +6,7 @@ Changes are listed newest first. Desktop and standalone CLI releases share the `
 
 - Retry encrypted HLS downloads once when FFmpeg 7.1+ rejects segment links without a file extension (exit code 183), as on Squarespace sites with a yt-dlp that lacks pycryptodomex. A repeated failure points to the app-managed yt-dlp.
 - Stop Linux copies that cannot replace themselves, such as package installs unpacked into /opt, from failing in-app updates with "Permission denied". The update panel explains how to update them instead.
+- Fix XRBAZAAR size-limited (two-pass) encoding with current FFmpeg development builds, which the app installs on Linux and Windows. FFmpeg also asked the audio encoder for a pass log and stopped with an I/O error.
 - Retain all fixes shipped in 0.1.23, including Instagram extraction and separate source and browser-cookie errors.
 
 ## 0.1.23 — 2026-10-17
