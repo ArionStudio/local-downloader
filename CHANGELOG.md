@@ -2,6 +2,12 @@
 
 Changes are listed newest first. Desktop and standalone CLI releases share the `app-vVERSION` tag. Installation, agent integration, and update instructions are in [docs/cli.md](docs/cli.md#updates-for-agents).
 
+## 0.1.24 — 2026-11-10
+
+- Retry encrypted HLS downloads once when FFmpeg 7.1+ rejects segment links without a file extension (exit code 183), as on Squarespace sites with a yt-dlp that lacks pycryptodomex. A repeated failure points to the app-managed yt-dlp.
+- Stop Linux copies that cannot replace themselves, such as package installs unpacked into /opt, from failing in-app updates with "Permission denied". The update panel explains how to update them instead.
+- Retain all fixes shipped in 0.1.23, including Instagram extraction and separate source and browser-cookie errors.
+
 ## 0.1.23 — 2026-10-17
 
 - Route Instagram posts and Reels through the dedicated extractor, returning one best rendition per video while preserving source audio and distinct carousel videos.
